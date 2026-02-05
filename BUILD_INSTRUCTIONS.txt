@@ -1,0 +1,16 @@
+# Build Instructions
+
+1.  Open your terminal in this folder.
+2.  Install PyInstaller (if not installed):
+    pip install pyinstaller
+
+3.  Run the build command:
+    pyinstaller --noconfirm --onedir --windowed --name "ActivityTracker" --add-data "daily_stats.json;." --icon=NONE main.py
+
+4.  Found your App!
+    Go to the "dist/ActivityTracker" folder.
+    Run "ActivityTracker.exe".
+
+# Notes
+- If you copy the app to another computer, copy the WHOLE "ActivityTracker" folder.
+- If you want a single file, change "--onedir" to "--onefile", but "--onedir" is faster to start.
