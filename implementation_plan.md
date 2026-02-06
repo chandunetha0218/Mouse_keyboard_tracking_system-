@@ -16,14 +16,25 @@ Create a Python Desktop Application that tracks User Activity (Active vs Idle) b
     - payload: `{user_id, status, timestamp, duration}`
 - **Authentication**: simple Login screen in the app to get a token/user_ID from the website.
 
-### 2. Activity Logic
-- **Tracker Class**: run in a separate thread.
-- **Mouse Listener**: `on_move`, `on_click`, `on_scroll` -> updates `last_active_time`.
-- **Keyboard Listener**: `on_press` -> updates `last_active_time`.
-- **Timer Loop**: Checks every 1 second:
-    - If `now - last_active > 5 minutes`: State = IDLE
-    - Else: State = WORKING
-    - Log transition events (e.g., Working -> Idle).
+### 2. Activity Logic (Strict Event-Driven)
+- **Rules**:
+    - **Start**: ONLY when HRMS "Punch In" is detected (Transition or Fresh). Time must be 10:00 - 18:00.
+    - **Stop**: ONLY when:
+        1. HRMS "Punch Out" detected.
+        2. HRMS "Logout" detected (or Session Invalid).
+        3. App Closing.
+    - **Resume**: NO auto-resume on app restart/login if "Punch In" is stale. Require fresh "Punch In" event or explicit user confirmation. (User Requirement: "Resume only after Punch In again").
+- **Reporting**:
+    - Generate Report on **STOP** (Logout/Punch Out).
+    - Append to Daily Report.
+    - Reset Stats at 00:00 midnight.
+    - Track "Sessions" list: `[{start, end, work, idle}, ...]`.
+
+### 3. Desktop Client (Python)
+- **Main Controller**:
+    - `handle_sync(punch_in, punch_out, is_logged_in)`
+    - `check_logout_condition()`
+- **Persistence**: Save `daily_sessions.json`.
 
 ## Proposed Layout
 - **Login Screen**: URL config, Username, Password.

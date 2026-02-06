@@ -73,26 +73,44 @@
     }
 
     /* -------------------- TIME PARSER -------------------- */
-    function getPunchTime() {
-        // STRATEGY 1: HEADER SEARCH (Most Accurate)
-        // Find header containing "FIRST IN"
+    function getPunchTimeObj() {
+        // STRATEGY: Find "First In" and "Last Out" columns
         const headers = Array.from(document.querySelectorAll('th'));
-        const targetHeader = headers.find(h => /FIRST IN/i.test(h.innerText));
+        const inHeader = headers.find(h => /FIRST IN/i.test(h.innerText));
+        const outHeader = headers.find(h => /LAST OUT/i.test(h.innerText));
 
-        if (targetHeader) {
-            // Find the column index
-            const headerRow = targetHeader.parentElement;
-            const columnIndex = Array.from(headerRow.children).indexOf(targetHeader);
+        if (inHeader) {
+            const table = inHeader.closest('table');
+            // Get Indices
+            const headerRow = inHeader.parentElement;
+            const inIndex = Array.from(headerRow.children).indexOf(inHeader);
+            const outIndex = outHeader ? Array.from(headerRow.children).indexOf(outHeader) : -1;
 
-            // Find the data in the first row of the table body
-            const table = targetHeader.closest('table');
-            const firstDataRow = table.querySelector('tbody tr');
+            // Find the *LAST* valid row (assuming chronological order)
+            // Or usually the first row is the latest? It depends on the sorting.
+            // Let's assume ROW 1 is the relevant one for today.
+            const rows = table.querySelectorAll('tbody tr');
+            if (rows.length > 0) {
+                const row = rows[0]; // First data row
+                if (row.children[inIndex]) {
+                    let tIn = row.children[inIndex].innerText.trim();
+                    let tOut = (outIndex > -1 && row.children[outIndex]) ? row.children[outIndex].innerText.trim() : null;
 
-            if (firstDataRow && firstDataRow.children[columnIndex]) {
-                return firstDataRow.children[columnIndex].innerText.trim();
+                    // Clean data
+                    if (["--", "-", "", "null"].includes(tIn)) tIn = null;
+                    if (["--", "-", "", "null"].includes(tOut)) tOut = null;
+
+                    if (tIn) return { in: tIn, out: tOut };
+                }
             }
         }
-        return null;
+        return null; // Not found
+    }
+
+    // Legacy Wrapper
+    function getPunchTime() {
+        const obj = getPunchTimeObj();
+        return obj ? obj.in : null;
     }
 
     /* -------------------- CORE LOOP -------------------- */
@@ -109,29 +127,64 @@
         if (!punchIn) {
             // Check context to give helpful messages
             if (/login/i.test(document.title)) {
-                updateStatus("Tracker: Please Login", "#FF4444"); // Red
+                updateStatus("Tracker: User Logged Out", "#FF4444");
+                // Send Logout Signal
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url: `${APP_BASE}/sync?status=logged_out`,
+                    onload: () => isConnected = true,
+                    onerror: () => isConnected = false
+                });
             } else if (!/attendance/i.test(window.location.href)) {
-                updateStatus("Tracker: Go to 'Attendance'", "#FFA500"); // Orange
+                updateStatus("Tracker: Go to 'Attendance'", "#FFA500");
+                // Send Heartbeat (Still logged in, just navigating)
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url: `${APP_BASE}/sync?status=logged_in`, # Just heartbeat
+                    onload: () => isConnected = true,
+                    onerror: () => isConnected = false
+                });
             } else {
                 updateStatus("Tracker: Searching Table...", "#FFA500");
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url: `${APP_BASE}/sync?status=logged_in&punch_in=null`,
+                    onload: () => isConnected = true,
+                    onerror: () => isConnected = false
+                });
             }
         } else {
             // 4. Sync
             const today = new Date().toISOString().split('T')[0];
-            const url = `${APP_BASE}/sync?punch_in=${encodeURIComponent(punchIn)}&date=${encodeURIComponent(today)}`;
 
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: url,
-                onload: () => {
-                    updateStatus(`Synced: ${punchIn}`, "#00C851"); // Green
-                    isConnected = true;
-                },
-                onerror: () => {
-                    updateStatus("Tracker: App Error (Check Python)", "#FF4444");
-                    isConnected = false;
-                }
-            });
+            // Check for Punch Out in the same row/table if possible. 
+            // Current getPunchTime() only gets "First In". 
+            // Ideally we need "Last Out" too. 
+            // For now, if we found Punch In, we assume we are "Logged In + Punched In".
+            // We need to upgrade getPunchTime to return an object {in, out}
+
+            const punchData = getPunchTimeObj(); // UPGRADED FUNCTION CALL
+            const pIn = punchData ? punchData.in : null;
+            const pOut = punchData ? punchData.out : null;
+
+            if (pIn) {
+                const url = `${APP_BASE}/sync?punch_in=${encodeURIComponent(pIn)}&punch_out=${encodeURIComponent(pOut || "")}&date=${encodeURIComponent(today)}&status=logged_in`;
+
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url: url,
+                    onload: () => {
+                        let display = `In: ${pIn}`;
+                        if (pOut) display += ` | Out: ${pOut}`;
+                        updateStatus(display, pOut ? "#FFA500" : "#00C851"); // Orange if Out, Green if In
+                        isConnected = true;
+                    },
+                    onerror: () => {
+                        updateStatus("Tracker: App Error", "#FF4444");
+                        isConnected = false;
+                    }
+                });
+            }
         }
 
         // Heartbeat if idle (to keep "Waiting" status away on App)

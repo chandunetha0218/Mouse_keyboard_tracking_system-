@@ -4,3 +4,4 @@ pynput
 matplotlib
 Pillow
 reportlab
+pystray

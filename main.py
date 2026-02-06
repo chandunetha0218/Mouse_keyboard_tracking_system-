@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 
 from tracker import ActivityTracker
 from api_client import ApiClient
+import pystray
+from PIL import Image, ImageDraw
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -28,7 +30,7 @@ class TimeTrackerApp(ctk.CTk):
         self.total_idle_seconds = 0 # Accumulate idle time
         self.hourly_stats = {} # Format: {"09": {"work": 0, "idle": 0}, ...}
         self.is_punched_in = False
-        self.target_seconds = 7 * 3600 # 7 Hours
+        self.target_seconds = 8 * 3600 # 8 Hours
         self.current_state = "WAITING"
         
         # Logic Components
@@ -38,6 +40,7 @@ class TimeTrackerApp(ctk.CTk):
         self.app_running = True # Control flag for background threads
         self.last_sync_time = time.time() # For high-precision deltas
         self.current_date = datetime.date.today().strftime("%Y-%m-%d")
+        self.last_processed_punch_in = None # To track unique sessions
         
         # Office Hours Configuration (24h format)
         self.OFFICE_START_HOUR = 10 # 10:00 AM
@@ -69,6 +72,10 @@ class TimeTrackerApp(ctk.CTk):
 
         # Start UI Update Loop (Main Thread)
         self.update_ui_loop()
+        
+        # System Tray Component
+        self.tray_icon = None
+        self.create_tray_icon()
 
     def is_within_working_hours(self):
         """Checks if tracking is allowed (10 AM - 6 PM)."""
@@ -139,11 +146,68 @@ class TimeTrackerApp(ctk.CTk):
         
         self.show_login()
 
+    def create_tray_icon(self):
+        """Creates the system tray icon."""
+        try:
+            print("[DEBUG] Creating Tray Icon...")
+            # Create a simple icon image (Red Box for visibility)
+            self.icon_image = Image.new('RGB', (64, 64), color=(255, 0, 0))
+            draw = ImageDraw.Draw(self.icon_image)
+            draw.rectangle((16, 16, 48, 48), fill=(255, 255, 255))
+            
+            menu = (
+                pystray.MenuItem("Show", self.show_window, default=True),
+                pystray.MenuItem("Quit", self.quit_app)
+            )
+            
+            self.tray_icon = pystray.Icon("name", self.icon_image, "Activity Tracker", menu)
+            
+            # Start tray in a separate thread because it can be blocking
+            print("[DEBUG] Starting Tray Icon Thread...")
+            threading.Thread(target=self._run_tray, daemon=True).start()
+            
+        except Exception as e:
+            print(f"Tray Icon Error: {e}")
+
+    def _run_tray(self):
+        try:
+            print("[DEBUG] Tray Icon Loop Started")
+            self.tray_icon.run()
+            print("[DEBUG] Tray Icon Loop Ended")
+        except Exception as e:
+            print(f"[DEBUG] Tray Run Failed: {e}")
+
+    def show_window(self, icon=None, item=None):
+        """Restores the window from the tray."""
+        self.after(0, self.deiconify)
+
+    def quit_app(self, icon=None, item=None):
+        """Fully exits the application."""
+        self.app_running = False
+        self.tracking_active = False
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.destroy()
+        os._exit(0) # Force kill all threads
+
     def on_closing(self):
-        if self.tracking_active:
-             self.destroy() # Allow closing, stop_tracking will be called during destruction/sync loop halt
+        """Overrides the 'X' button to minimize to tray instead of closing."""
+        print("[DEBUG] on_closing called")
+        # Only minimize if tray is actually available (created)
+        if self.tray_icon:
+            print("[DEBUG] Tray Icon exists. Withdrawing window.")
+            self.withdraw() # Hide window
+            if hasattr(self.tray_icon, 'notify'):
+                try:
+                    self.tray_icon.notify("Tracker minimized to tray. Right-click icon to Quit.", "Activity Tracker")
+                except:
+                    pass
+            # Also ensure the icon is visible/running? 
+            # In pystray, if it's running in a thread, it should be fine.
         else:
-            self.destroy()
+            # Fallback: Just quit if tray failed to prevent app from becoming stuck
+            print("Tray Icon not available. Exiting app.")
+            self.quit_app()
 
     def create_login_view(self):
         frame = ctk.CTkFrame(self.container, fg_color="transparent")
@@ -228,7 +292,7 @@ class TimeTrackerApp(ctk.CTk):
         self.lbl_idle_time = None
 
         # 3. Progress Bar (Target 7h)
-        self.lbl_target = ctk.CTkLabel(frame, text="Target: 7 Hours")
+        self.lbl_target = ctk.CTkLabel(frame, text="Target: 8 Hours")
         self.lbl_target.pack(pady=(10, 0))
         self.progress_bar = ctk.CTkProgressBar(frame)
         self.progress_bar.set(0)
@@ -368,6 +432,12 @@ class TimeTrackerApp(ctk.CTk):
                     self.send_response(200)
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
+                elif parsed_path.path == '/show':
+                    app_ref.after(0, app_ref.show_window)
+                    self.send_response(200)
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(b"Window Restored")
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -387,49 +457,67 @@ class TimeTrackerApp(ctk.CTk):
                 print(f"[BRIDGE] Critical Server Error: {e}")
                 time.sleep(5)
 
-    def process_sync_data(self, punch_in, punch_out, attendance_date, server_work_seconds=None):
+    def process_sync_data(self, punch_in, punch_out, attendance_date, server_work_seconds=None, status=None):
         """Processes punch data received via bridge or polling."""
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         
         # Validation: Only process if it's for today
         if attendance_date and str(attendance_date) != today_str:
-            print(f"[SYNC] WARNING: Data Date '{attendance_date}' != System Date '{today_str}'. Ignoring?")
-            # Relaxed check: If it's a valid punch-in and we are desperate, maybe we allow it?
-            # For now, strict but voiced.
+            print(f"[SYNC] WARNING: Data Date '{attendance_date}' != System Date '{today_str}'. Ignoring.")
             return
 
-        invalid_vals = [None, "null", "none", "", "-", "undefined", "false"]
+        print(f"[SYNC] Received - In: '{punch_in}', Out: '{punch_out}', Status: '{status}'")
+
+        # 1. HANDLE LOGOUT (Strict Stop)
+        if status == "logged_out":
+            if self.tracking_active:
+                print("[SYNC] User Logged Out. Stopping Tracker.")
+                self.stop_tracking("Logged Out")
+            return
+
+        # 2. HANDLE PUNCH DATA
+        invalid_vals = [None, "null", "none", "", "-", "--", "--:--", "undefined", "false"]
         is_punched_in = punch_in not in invalid_vals
         is_punched_out = punch_out not in invalid_vals
 
-        print(f"[SYNC] Received - In: '{punch_in}', Out: '{punch_out}', Date: '{attendance_date}'")
-
-        if is_punched_in and not is_punched_out:
-            # Update Total Work Seconds from Server if available
-            # Update Total Work Seconds from Server if available
-            if server_work_seconds is not None and float(server_work_seconds) > 0:
-                print(f"[SYNC] Ignoring Server Work Time (User requested Local Timer): {server_work_seconds}s")
-                # self.total_work_seconds = float(server_work_seconds)
+        if is_punched_in:
+            # Check if this is a "Fresh" punch (New Session)
+            # Logic: If we are stopped, we only start if the punch is DIFFERENT from the last session's punch
+            # OR if we haven't tracked anything yet.
             
-            # Auto-start logic
-            if not self.tracking_active:
-                print(f"[SYNC] Auto-starting tracking based on punch-in: {punch_in}")
+            is_new_punch = (punch_in != self.last_processed_punch_in)
+            
+            if is_punched_out:
+                # Case: Punched Out (Completed Session)
+                # If we are somehow tracking, STOP.
+                if self.tracking_active:
+                     print(f"[SYNC] Punch Out Detected ({punch_out}). Stopping.")
+                     self.stop_tracking("Punched Out")
+                # Ensure we don't auto-start again for this specific punch-in time
+                self.last_processed_punch_in = punch_in 
+
+            elif not self.tracking_active:
+                # Case: Punched In, Not Tracking.
+                # Smart Resume Logic (User Request): "If user already punch in, it should run automatically"
+                # We check if the punch-in is from Today. Since we only sync Today's data, this is implicit.
+                # BUT we need to ensure we don't restart a session that was explicitly stopped by "Punch Out".
+                # Here, we are in the "is_punched_in" and NOT "is_punched_out" block. So we are officially "Active".
+                
+                # We simply allow it to start if we are not tracking.
+                print(f"[SYNC] Existing Active Punch detected ({punch_in}). Smart Resume: Starting Tracker.")
                 self.start_tracking(punch_in_time_str=punch_in)
+                self.last_processed_punch_in = punch_in
+            
             else:
-                # If already tracking, ensure time is synced with punch-in (FALLBACK Only)
-                if not server_work_seconds:
-                    self.sync_timers_with_punch_in(punch_in)
-        elif is_punched_out:
-            if self.tracking_active:
-                print(f"[SYNC] Auto-stopping tracking based on punch-out: {punch_out}")
-                self.stop_tracking()
+                # Case: Tracking Active. Sync timestamps.
+                self.sync_timers_with_punch_in(punch_in)
+                self.last_processed_punch_in = punch_in
+        
         else:
-            # If no punch-in is detected but we are tracking, maybe we should stop?
-            # User says candidate is punched in, so if we aren't seeing it, it might be a script issue.
-            print(f"[SYNC] No active punch detected. In='{punch_in}', Out='{punch_out}'")
+            # Case: No Punch In.
             if self.tracking_active:
-                 # Be cautious about auto-stopping if we could be missing a selector
-                 pass 
+                 print(f"[SYNC] No active punch detected. Stopping.")
+                 self.stop_tracking("No Data") 
 
     def sync_timers_with_punch_in(self, punch_in_str):
         """Calculates work time based on: Current Time - Punch In - Total Idle."""
@@ -465,9 +553,9 @@ class TimeTrackerApp(ctk.CTk):
 
             # Only update if there's a significant difference (Sync) or if we are at 0
             # Only update if there's a significant difference (Sync) or if we are at 0
-            if self.total_work_seconds == 0 or abs(calculated_work - self.total_work_seconds) > 10:
-                pass # DISABLED: User wants timer to start from 0 when App connects
-                # self.total_work_seconds = calculated_work
+            if self.total_work_seconds == 0 or abs(calculated_work - self.total_work_seconds) > 300:
+                 print(f"[SYNC] Adjusting Timer: Local={self.total_work_seconds}s -> ServerCalc={calculated_work}s")
+                 self.total_work_seconds = calculated_work
                 
         except Exception as e:
             print(f"[SYNC] Time Sync Error: {e} for string '{punch_in_str}'")
@@ -681,19 +769,19 @@ class TimeTrackerApp(ctk.CTk):
         self.show_notification("HRMS EVENT: PUNCH IN DETECTED")
         self.btn_start.configure(fg_color="#006400")
 
-    def stop_tracking(self):
+    def stop_tracking(self, reason="Manual"):
         """Stops the LOCAL activity tracking."""
         if not self.tracking_active:
              return
 
-        self.log_msg("System: HRMS Punch-Out detected. Stopping tracking.")
+        self.log_msg(f"System: Tracking Stopped ({reason}).")
         self.tracking_active = False
         self.tracker.stop()
         self.lbl_status.configure(text="OFF THE CLOCK", text_color="gray")
         self.btn_start.configure(fg_color="#1E1E1E")
         self.btn_stop.configure(fg_color="#1E1E1E")
         self.save_local_stats()
-        self.show_notification("HRMS EVENT: PUNCH OUT DETECTED")
+        self.show_notification(f"HRMS EVENT: STOPPED ({reason})")
 
     def load_local_stats(self):
         """Loads today's stats from JSON to preserve analytics."""
