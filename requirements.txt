@@ -3,3 +3,4 @@ requests
 pynput
 matplotlib
 Pillow
+reportlab

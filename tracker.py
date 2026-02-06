@@ -17,6 +17,10 @@ class ActivityTracker:
         # Jitter Filter
         self.last_x = 0
         self.last_y = 0
+        
+        # Long Press Detection
+        self.last_keypress_key = None
+        self.last_keypress_time = 0
 
     def _on_move(self, x, y):
         # Ignore small movements (Jitter)
@@ -36,6 +40,26 @@ class ActivityTracker:
         self._update_activity()
 
     def _on_key_press(self, key):
+        current_time = time.time()
+        
+        # Check if it's the same key as before
+        if key == self.last_keypress_key:
+            duration = current_time - self.last_keypress_time
+            if duration > 10:
+                # User is holding key > 10s. Treat as IDLE (Do not update activity)
+                return
+        else:
+            # New key pressed
+            self.last_keypress_key = key
+            self.last_keypress_time = current_time
+            
+        self._update_activity()
+
+    def _on_key_release(self, key):
+        # Reset on release
+        if key == self.last_keypress_key:
+            self.last_keypress_key = None
+            self.last_keypress_time = 0
         self._update_activity()
 
     def _update_activity(self):
@@ -57,7 +81,8 @@ class ActivityTracker:
             on_scroll=self._on_scroll
         )
         self.keyboard_listener = keyboard.Listener(
-            on_press=self._on_key_press
+            on_press=self._on_key_press,
+            on_release=self._on_key_release
         )
         
         self.mouse_listener.start()

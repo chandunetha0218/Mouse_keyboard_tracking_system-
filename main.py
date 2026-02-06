@@ -20,11 +20,13 @@ class TimeTrackerApp(ctk.CTk):
         super().__init__()
 
         self.title("Activity Tracker v2.2")
-        self.geometry("600x700") # Increased size for chart
+        self.title("Activity Tracker v2.2")
+        self.geometry("600x800") # Optimized size
         
         # State Variables
         self.total_work_seconds = 0
         self.total_idle_seconds = 0 # Accumulate idle time
+        self.hourly_stats = {} # Format: {"09": {"work": 0, "idle": 0}, ...}
         self.is_punched_in = False
         self.target_seconds = 7 * 3600 # 7 Hours
         self.current_state = "WAITING"
@@ -48,9 +50,13 @@ class TimeTrackerApp(ctk.CTk):
         # Views
         self.login_view = self.create_login_view()
         self.dashboard_view = self.create_dashboard_view()
+        self.compact_view = self.create_compact_view()
 
         # PROTOCOLS
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Track View State
+        self.is_compact = False
 
         # Show Login Screen Immediately (Instant Startup)
         self.show_login()
@@ -165,6 +171,10 @@ class TimeTrackerApp(ctk.CTk):
         # Logout Button (Top Right)
         btn_logout = ctk.CTkButton(frame, text="Logout", width=60, height=20, fg_color="red", command=self.logout)
         btn_logout.pack(anchor="ne", pady=(0, 10))
+
+        # Compact Mode Button (Top Left)
+        btn_compact = ctk.CTkButton(frame, text="↗ Mini Mode", width=80, height=20, fg_color="#555", command=self.toggle_compact_mode)
+        btn_compact.place(x=0, y=0)
         
         # 1. Status Header
         self.lbl_status = ctk.CTkLabel(frame, text="WAITING FOR PUNCH IN", font=("Roboto", 24, "bold"), text_color="grey")
@@ -176,7 +186,10 @@ class TimeTrackerApp(ctk.CTk):
 
         # CONNECTIVITY STATUS
         self.lbl_bridge = ctk.CTkLabel(frame, text="Browser Sync: 🔴 Waiting...", font=("Roboto", 12), text_color="#A0A0A0")
-        self.lbl_bridge.pack(pady=(0, 10))
+        self.lbl_bridge.pack(pady=(0, 5))
+        
+        self.lbl_punch_time = ctk.CTkLabel(frame, text="", font=("Roboto", 12), text_color="#2CC985")
+        self.lbl_punch_time.pack(pady=(0, 10))
 
         # 2. Statistics Grid
         stats_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -221,6 +234,10 @@ class TimeTrackerApp(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.pack(fill="x", pady=(5, 20))
 
+        # --- MOVED BUTTON HERE FOR VISIBILITY ---
+        self.btn_report = ctk.CTkButton(frame, text="Download Daily Report (PDF)", command=self.generate_report, fg_color="#3B8ED0")
+        self.btn_report.pack(pady=(0, 20), fill="x", padx=10)
+
         # 4. Matplotlib Chart
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
@@ -236,6 +253,42 @@ class TimeTrackerApp(ctk.CTk):
         self.console.configure(state="disabled")
 
         return frame
+
+    def create_compact_view(self):
+        """Creates the Mini/Compact interface."""
+        frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        
+        # Expand Button
+        btn_expand = ctk.CTkButton(frame, text="↙ Expand", width=60, height=20, fg_color="#555", command=self.toggle_compact_mode)
+        btn_expand.pack(pady=(5, 5), anchor="ne")
+        
+        self.lbl_compact_status = ctk.CTkLabel(frame, text="ACTIVE", font=("Roboto", 14, "bold"), text_color="green")
+        self.lbl_compact_status.pack(pady=0)
+
+        self.lbl_compact_work = ctk.CTkLabel(frame, text="00:00:00", font=("Roboto", 32, "bold"), text_color="#2CC985")
+        self.lbl_compact_work.pack(pady=5)
+        
+        self.lbl_compact_idle = ctk.CTkLabel(frame, text="Idle: 00:00:00", font=("Roboto", 12), text_color="#FFB347")
+        self.lbl_compact_idle.pack(pady=0)
+        
+        return frame
+
+    def toggle_compact_mode(self):
+        """Switches between Full and Mini modes."""
+        if not self.is_compact:
+            # Switch to Compact
+            self.dashboard_view.pack_forget()
+            self.compact_view.pack(fill="both", expand=True)
+            self.geometry("300x160")
+            self.attributes('-topmost', True) # Always on top
+            self.is_compact = True
+        else:
+            # Switch to Full
+            self.compact_view.pack_forget()
+            self.dashboard_view.pack(fill="both", expand=True)
+            self.geometry("600x800")
+            self.attributes('-topmost', False)
+            self.is_compact = False
 
     def show_login(self):
         self.dashboard_view.pack_forget()
@@ -321,11 +374,18 @@ class TimeTrackerApp(ctk.CTk):
             
             def log_message(self, format, *args): pass
 
-        try:
-            server = HTTPServer(('localhost', 12345), CommandHandler)
-            server.serve_forever()
-        except:
-            print("Could not start Command Server")
+        while True:
+            try:
+                # Use 127.0.0.1 instead of localhost for better Windows compatibility
+                server = HTTPServer(('127.0.0.1', 12345), CommandHandler)
+                print("[BRIDGE] Command Server Successfully Started on Port 12345")
+                server.serve_forever()
+            except OSError as e:
+                print(f"[BRIDGE] Port 12345 busy or unavailable: {e}. Retrying in 5s...")
+                time.sleep(5)
+            except Exception as e:
+                print(f"[BRIDGE] Critical Server Error: {e}")
+                time.sleep(5)
 
     def process_sync_data(self, punch_in, punch_out, attendance_date, server_work_seconds=None):
         """Processes punch data received via bridge or polling."""
@@ -346,9 +406,10 @@ class TimeTrackerApp(ctk.CTk):
 
         if is_punched_in and not is_punched_out:
             # Update Total Work Seconds from Server if available
+            # Update Total Work Seconds from Server if available
             if server_work_seconds is not None and float(server_work_seconds) > 0:
-                print(f"[SYNC] Using Server Work Time: {server_work_seconds}s")
-                self.total_work_seconds = float(server_work_seconds)
+                print(f"[SYNC] Ignoring Server Work Time (User requested Local Timer): {server_work_seconds}s")
+                # self.total_work_seconds = float(server_work_seconds)
             
             # Auto-start logic
             if not self.tracking_active:
@@ -403,8 +464,10 @@ class TimeTrackerApp(ctk.CTk):
             # print(f"[DEBUG] Sync Calc: Now={now.strftime('%H:%M:%S')}, Punch={punch_dt.strftime('%H:%M:%S')}, Elapsed={int(elapsed_total)}s, Local_Idle={int(self.total_idle_seconds)}s -> Work={int(calculated_work)}s")
 
             # Only update if there's a significant difference (Sync) or if we are at 0
+            # Only update if there's a significant difference (Sync) or if we are at 0
             if self.total_work_seconds == 0 or abs(calculated_work - self.total_work_seconds) > 10:
-                self.total_work_seconds = calculated_work
+                pass # DISABLED: User wants timer to start from 0 when App connects
+                # self.total_work_seconds = calculated_work
                 
         except Exception as e:
             print(f"[SYNC] Time Sync Error: {e} for string '{punch_in_str}'")
@@ -473,8 +536,11 @@ class TimeTrackerApp(ctk.CTk):
         if self.tracking_active:
              color = "green" if self.current_state == "WORKING" else "orange"
              self.lbl_status.configure(text=self.current_state, text_color=color)
+             # Update Compact Status too
+             self.lbl_compact_status.configure(text=self.current_state, text_color=color)
         else:
              self.lbl_status.configure(text="OFF THE CLOCK", text_color="grey")
+             self.lbl_compact_status.configure(text="OFFLINE", text_color="grey")
 
         # Just show totals
         work_str = self.format_time(self.total_work_seconds)
@@ -482,6 +548,10 @@ class TimeTrackerApp(ctk.CTk):
         
         self.btn_start.configure(text=f"WORK TIME\n\n{work_str}")
         self.btn_stop.configure(text=f"IDLE TIME\n\n{idle_str}")
+        
+        # Update Compact Labels
+        self.lbl_compact_work.configure(text=work_str)
+        self.lbl_compact_idle.configure(text=f"Idle: {idle_str}")
         
         # Update progress
         progress = self.total_work_seconds / self.target_seconds
@@ -566,10 +636,16 @@ class TimeTrackerApp(ctk.CTk):
                     
                     # ONLY ACCUMULATE TIME IF WITHIN 10 AM - 6 PM
                     if working_hours:
+                        hour_key = datetime.datetime.now().strftime("%H") # e.g. "09", "10"
+                        if hour_key not in self.hourly_stats:
+                            self.hourly_stats[hour_key] = {"work": 0, "idle": 0}
+
                         if state == "WORKING":
                             self.total_work_seconds += delta
+                            self.hourly_stats[hour_key]["work"] += delta
                         else:
                             self.total_idle_seconds += delta
+                            self.hourly_stats[hour_key]["idle"] += delta
                     
                     # Upload Heartbeat (Every ~30 seconds)
                     # We still upload heartbeat to keep session alive, but maybe with "IDLE" or special status?
@@ -598,6 +674,7 @@ class TimeTrackerApp(ctk.CTk):
         if punch_in_time_str:
             self.log_msg(f"System: HRMS Punch-In Time: {punch_in_time_str}")
             self.sync_timers_with_punch_in(punch_in_time_str)
+            self.lbl_punch_time.configure(text=f"Clocked In at: {punch_in_time_str}")
 
         self.tracking_active = True
         self.tracker.start()
@@ -634,14 +711,17 @@ class TimeTrackerApp(ctk.CTk):
                 if data.get("date") == today_str:
                     self.total_work_seconds = data.get("work", 0)
                     self.total_idle_seconds = data.get("idle", 0)
+                    self.hourly_stats = data.get("hourly", {})
                 else:
                     # New day, start from 0
                     self.total_work_seconds = 0
                     self.total_idle_seconds = 0
+                    self.hourly_stats = {}
             else:
                 # No existing file, start from 0
                 self.total_work_seconds = 0
                 self.total_idle_seconds = 0
+                self.hourly_stats = {}
         except:
             pass
 
@@ -657,7 +737,8 @@ class TimeTrackerApp(ctk.CTk):
             data = {
                 "date": today_str,
                 "work": self.total_work_seconds,
-                "idle": self.total_idle_seconds
+                "idle": self.total_idle_seconds,
+                "hourly": self.hourly_stats
             }
             with open(filename, "w") as f:
                 json.dump(data, f)
@@ -700,6 +781,177 @@ class TimeTrackerApp(ctk.CTk):
             print("Notification Failed")
 
 
+    def generate_report(self):
+        """Generates a PDF report with charts and stats."""
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.utils import ImageReader
+            import io
+
+            # 1. Create Data
+            today_str = datetime.date.today().strftime("%d-%b-%Y")
+            user_id = self.api.employee_id if hasattr(self.api, 'employee_id') else "Unknown"
+            role = self.api.course_role if hasattr(self.api, 'course_role') else "Employee"
+            
+            work_formatted = self.format_time(self.total_work_seconds)
+            idle_formatted = self.format_time(self.total_idle_seconds)
+            
+            total_sec = self.total_work_seconds + self.total_idle_seconds
+            work_pct = (self.total_work_seconds / total_sec * 100) if total_sec > 0 else 0
+            idle_pct = (self.total_idle_seconds / total_sec * 100) if total_sec > 0 else 0
+
+            # 2. Setup Filename
+            home_dir = os.path.expanduser("~")
+            save_dir = os.path.join(home_dir, "Downloads")
+            # Add Timestamp to avoid "Permission Denied" if file is open
+            timestamp = datetime.datetime.now().strftime("%H-%M-%S")
+            filename = os.path.join(save_dir, f"WorkResult_{user_id}_{today_str}_{timestamp}.pdf")
+            
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+
+            # 3. Draw Header
+            c.setFont("Helvetica-Bold", 20)
+            c.drawString(50, height - 40, "Daily Activity Report")
+            
+            c.setFont("Helvetica", 10)
+            c.setFillColor("gray")
+            c.drawString(50, height - 60, f"Date: {today_str}")
+            
+            c.setLineWidth(1)
+            c.setStrokeColor("gray")
+            c.line(50, height - 70, width - 50, height - 70)
+
+            # 4. User Info (Compressed)
+            c.setFillColor("black")
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, height - 100, "Employee Details:")
+            
+            c.setFont("Helvetica", 10)
+            c.drawString(70, height - 120, f"ID: {user_id}   |   Role: {role}")
+            c.drawString(70, height - 135, f"Generated At: {datetime.datetime.now().strftime('%H:%M:%S')}")
+
+            # 5. Statistics Box (Compressed)
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, height - 165, "Time Summary:")
+            
+            # Draw Box
+            box_top = height - 180
+            c.rect(50, box_top - 50, 400, 50, fill=0)
+            
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(70, box_top - 20, "WORK TIME")
+            c.drawString(250, box_top - 20, "IDLE TIME")
+            
+            c.setFont("Helvetica", 12)
+            c.setFillColor("#008000") # Green
+            c.drawString(70, box_top - 40, work_formatted)
+            
+            c.setFillColor("#FFA500") # Orange
+            c.drawString(250, box_top - 40, idle_formatted)
+            
+            c.setFillColor("black")
+
+            # 7. Hourly Timeline Table (Moved Up)
+            c.setFont("Helvetica-Bold", 12)
+            timeline_start_y = height - 260
+            c.drawString(50, timeline_start_y, "Hourly Timeline:")
+            
+            # Table Header
+            c.setFont("Helvetica-Bold", 9)
+            y_pos = timeline_start_y - 20
+            c.drawString(70, y_pos, "Time Slot")
+            c.drawString(200, y_pos, "Work Time")
+            c.drawString(350, y_pos, "Idle Time")
+            
+            c.setLineWidth(0.5)
+            c.line(50, y_pos - 5, 500, y_pos - 5)
+            y_pos -= 20
+            
+            # Iterate through hours (sorted)
+            c.setFont("Helvetica", 9)
+            sorted_hours = sorted(self.hourly_stats.keys())
+            
+            # Layout Calculation: Chart uses bottom 250px. Safety line at y=300.
+            chart_height = 200
+            chart_y_pos = 80
+            safety_margin = chart_y_pos + chart_height + 20 # ~300
+            
+            for h in sorted_hours:
+                stats = self.hourly_stats[h]
+                w_sec = stats.get("work", 0)
+                i_sec = stats.get("idle", 0)
+                
+                time_slot = f"{h}:00 - {int(h)+1:02d}:00"
+                work_t = self.format_time(w_sec)
+                idle_t = self.format_time(i_sec)
+                
+                c.drawString(70, y_pos, time_slot)
+                c.setFillColor("green")
+                c.drawString(200, y_pos, work_t)
+                c.setFillColor("orange")
+                c.drawString(350, y_pos, idle_t)
+                c.setFillColor("black")
+                y_pos -= 15
+                
+                # Page Break if we hit the Chart area
+                if y_pos < safety_margin: 
+                    c.showPage()
+                    y_pos = height - 50
+
+            # 6. Chart (Trick: Save Matplotlib figure to BytesIO buffer)
+            buf = io.BytesIO()
+            # Reuse existing figure to save resources, but we need to ensure it's not transparent for PDF maybe
+            # Create a dedicated figure for report to control styling purely for PDF
+            fig = Figure(figsize=(6, 3), dpi=100) # Flatter chart
+            ax = fig.add_subplot(111)
+            
+            labels = [f'Working ({work_pct:.1f}%)', f'Idle ({idle_pct:.1f}%)']
+            sizes = [max(1, self.total_work_seconds), max(0, self.total_idle_seconds)]
+            colors = ['#2CC985', '#FFB347']
+            
+            if self.total_work_seconds == 0 and self.total_idle_seconds == 0:
+                sizes = [1]
+                labels = ["No Data"]
+                colors = ["#CCCCCC"]
+            
+            ax.pie(sizes, labels=labels, autopct=None, startangle=90, colors=colors)
+            ax.set_title("Activity Distribution")
+            
+            fig.savefig(buf, format='png')
+            buf.seek(0)
+            
+            # Draw Image on PDF (Anchored to Bottom)
+            c.drawImage(ImageReader(buf), 50, chart_y_pos, width=400, height=chart_height)
+            
+            # 8. Footer
+            c.setFont("Helvetica-Oblique", 10)
+            c.setFillColor("gray")
+            c.drawString(50, 40, "Generated by Automated Time Tracking System")
+            
+            c.save()
+            buf.close()
+            
+            self.show_notification(f"Report Saved to Downloads!")
+            self.log_msg(f"System: Report generated: {filename}")
+            
+            # Open the folder/file automatically for convenience
+            try:
+                os.startfile(filename)
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"Report Generation Failed: {e}")
+            self.log_msg("Error generating report. Check console.")
+
+
 if __name__ == "__main__":
-    app = TimeTrackerApp()
-    app.mainloop()
+    try:
+        app = TimeTrackerApp()
+        app.mainloop()
+    except KeyboardInterrupt:
+        print("\n[System] Application stopped by user.")
+    except Exception as e:
+        print(f"\n[System] Critical Error: {e}")

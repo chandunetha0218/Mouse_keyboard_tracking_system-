@@ -28,7 +28,7 @@ class ApiClient:
                 print(f"[API] POST {target_url} (Attempt {attempt})")
                 
                 # Render free tier takes ~45s to wake up from cold start.
-                resp = requests.post(target_url, json=payload, timeout=45)
+                resp = requests.post(target_url, json=payload, timeout=90)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -108,7 +108,7 @@ class ApiClient:
             # Add timestamp to bypass cache if any
             headers = {"Authorization": f"Bearer {self.token}", "Cache-Control": "no-cache"}
             url = f"{self.base_url}/api/attendance"
-            resp = requests.get(url, headers=headers, timeout=20)
+            resp = requests.get(url, headers=headers, timeout=60)
             
             if resp.status_code == 200:
                 data = resp.json()
