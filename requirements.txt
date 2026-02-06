@@ -1,0 +1,7 @@
+customtkinter
+requests
+pynput
+matplotlib
+Pillow
+reportlab
+pystray
