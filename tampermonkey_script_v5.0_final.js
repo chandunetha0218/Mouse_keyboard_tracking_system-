@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         HRMS Tracker Sync (v5.0 FINAL)
+// @name         HRMS Tracker Sync (v5.1 WORKED)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
-// @description  Syncs "FIRST IN" time. Pop-up confirms installation.
+// @version      5.1
+// @description  Syncs "WORKED" column. Pop-up confirms installation.
 // @author       Antigravity
 // @match        *://hrms-420.netlify.app/*
 // @match        *://hrms-ask-1.onrender.com/*
@@ -18,9 +18,9 @@
     const APP_BASE = "http://127.0.0.1:12345";
 
     // DIAGNOSTIC ALERT (Runs once to prove script is active)
-    if (!sessionStorage.getItem('hrms_tracker_alert_shown')) {
-        alert("Tracker Script v5.0 is INSTALLED and ACTIVE.\n\nLook for the black box in the bottom right corner.");
-        sessionStorage.setItem('hrms_tracker_alert_shown', 'true');
+    if (!sessionStorage.getItem('hrms_tracker_alert_shown_v51')) {
+        alert("Tracker Script v5.1 (WORKED SYNC) is INSTALLED and ACTIVE.\n\nLook for the black box in the bottom right corner.");
+        sessionStorage.setItem('hrms_tracker_alert_shown_v51', 'true');
     }
 
     /* -------------------- UI ENGINE -------------------- */
@@ -74,10 +74,11 @@
 
     /* -------------------- TIME PARSER -------------------- */
     function getPunchTimeObj() {
-        // STRATEGY: Find "First In" and "Last Out" columns
+        // STRATEGY: Find "First In", "Last Out", and "WORKED" columns
         const headers = Array.from(document.querySelectorAll('th'));
-        const inHeader = headers.find(h => /FIRST IN/i.test(h.innerText));
-        const outHeader = headers.find(h => /LAST OUT/i.test(h.innerText));
+        const inHeader = headers.find(h => /FIRST IN|PUNCH IN|IN TIME/i.test(h.innerText));
+        const outHeader = headers.find(h => /LAST OUT|PUNCH OUT|OUT TIME/i.test(h.innerText));
+        const workHeader = headers.find(h => /WORKED|DURATION|TOTAL TIME/i.test(h.innerText));
 
         if (inHeader) {
             const table = inHeader.closest('table');
@@ -85,6 +86,7 @@
             const headerRow = inHeader.parentElement;
             const inIndex = Array.from(headerRow.children).indexOf(inHeader);
             const outIndex = outHeader ? Array.from(headerRow.children).indexOf(outHeader) : -1;
+            const workIndex = workHeader ? Array.from(headerRow.children).indexOf(workHeader) : -1;
 
             // Find the *LAST* valid row (assuming chronological order)
             // Or usually the first row is the latest? It depends on the sorting.
@@ -95,12 +97,14 @@
                 if (row.children[inIndex]) {
                     let tIn = row.children[inIndex].innerText.trim();
                     let tOut = (outIndex > -1 && row.children[outIndex]) ? row.children[outIndex].innerText.trim() : null;
+                    let tWorked = (workIndex > -1 && row.children[workIndex]) ? row.children[workIndex].innerText.trim() : null;
 
                     // Clean data
                     if (["--", "-", "", "null"].includes(tIn)) tIn = null;
                     if (["--", "-", "", "null"].includes(tOut)) tOut = null;
+                    if (["--", "-", "", "null"].includes(tWorked)) tWorked = null;
 
-                    if (tIn) return { in: tIn, out: tOut };
+                    if (tIn) return { in: tIn, out: tOut, worked: tWorked };
                 }
             }
         }
@@ -140,7 +144,7 @@
                 // Send Heartbeat (Still logged in, just navigating)
                 GM_xmlhttpRequest({
                     method: "GET",
-                    url: `${APP_BASE}/sync?status=logged_in`, # Just heartbeat
+                    url: `${APP_BASE}/sync?status=logged_in`, // Just heartbeat
                     onload: () => isConnected = true,
                     onerror: () => isConnected = false
                 });
@@ -166,16 +170,23 @@
             const punchData = getPunchTimeObj(); // UPGRADED FUNCTION CALL
             const pIn = punchData ? punchData.in : null;
             const pOut = punchData ? punchData.out : null;
+            const pWork = punchData ? punchData.worked : null;
 
             if (pIn) {
-                const url = `${APP_BASE}/sync?punch_in=${encodeURIComponent(pIn)}&punch_out=${encodeURIComponent(pOut || "")}&date=${encodeURIComponent(today)}&status=logged_in`;
+                const url = `${APP_BASE}/sync?punch_in=${encodeURIComponent(pIn)}&punch_out=${encodeURIComponent(pOut || "")}&worked=${encodeURIComponent(pWork || "")}&date=${encodeURIComponent(today)}&status=logged_in`;
 
                 GM_xmlhttpRequest({
                     method: "GET",
                     url: url,
                     onload: () => {
                         let display = `In: ${pIn}`;
-                        if (pOut) display += ` | Out: ${pOut}`;
+                        if (pOut) {
+                             display += ` | Out: ${pOut}`;
+                        } else {
+                             display += ` | Running...`;
+                        }
+                        if (pWork) display += ` | Worked: ${pWork}`;
+                        
                         updateStatus(display, pOut ? "#FFA500" : "#00C851"); // Orange if Out, Green if In
                         isConnected = true;
                     },

@@ -19,7 +19,7 @@ class ApiClient:
         print(f"[API] Connecting to REAL BACKEND at {real_base_url}...")
         
         # --- PRODUCTION CODE (LIVE FETCH) ---
-        for attempt in range(1, 4): # Try 3 times
+        for attempt in range(1, 3): # Try 2 times (Reduced from 3 to save time)
             try:
                 payload = {"email": username, "password": password} 
                 
@@ -27,8 +27,8 @@ class ApiClient:
                 target_url = f"{real_base_url}/api/auth/login"
                 print(f"[API] POST {target_url} (Attempt {attempt})")
                 
-                # Render free tier takes ~45s to wake up from cold start.
-                resp = requests.post(target_url, json=payload, timeout=90)
+                # Render free tier takes ~45s to wake up. Reduced from 90s to 60s.
+                resp = requests.post(target_url, json=payload, timeout=60)
                 
                 if resp.status_code == 200:
                     data = resp.json()

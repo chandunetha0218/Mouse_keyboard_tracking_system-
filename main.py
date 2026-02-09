@@ -13,6 +13,8 @@ from tracker import ActivityTracker
 from api_client import ApiClient
 import pystray
 from PIL import Image, ImageDraw
+import sys
+import winreg
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -20,56 +22,50 @@ ctk.set_default_color_theme("blue")
 class TimeTrackerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-
-        self.title("Activity Tracker v2.2")
-        self.title("Activity Tracker v2.2")
-        self.geometry("600x800") # Optimized size
         
-        # State Variables
+        # Window Setup
+        self.title("Activity Tracker v2.2")
+        self.geometry("600x800")
+        self.resizable(False, False)
+        
+        # State
+        self.is_compact = False
+        self.tracking_active = False
+        self.start_time = None
         self.total_work_seconds = 0
-        self.total_idle_seconds = 0 # Accumulate idle time
-        self.hourly_stats = {} # Format: {"09": {"work": 0, "idle": 0}, ...}
-        self.is_punched_in = False
-        self.target_seconds = 8 * 3600 # 8 Hours
-        self.current_state = "WAITING"
+        self.total_idle_seconds = 0
+        self.current_date = datetime.date.today().strftime("%Y-%m-%d")
+        
+        # Sync State
+        self.last_processed_punch_in = None
+        
+        # Analytics
+        self.hourly_stats = {} # Format: "09": {"work": 0, "idle": 0}
+        self.load_local_stats()
         
         # Logic Components
+        self.target_seconds = 8 * 3600 # 8 Hours
+        self.current_state = "WAITING"
         self.tracker = ActivityTracker(idle_threshold_seconds=10) # 10 Seconds per User Request
         self.api = ApiClient("https://hrms-420.netlify.app/.netlify/functions/api") # Prod URL
-        self.tracking_active = False
         self.app_running = True # Control flag for background threads
         self.last_sync_time = time.time() # For high-precision deltas
-        self.current_date = datetime.date.today().strftime("%Y-%m-%d")
-        self.last_processed_punch_in = None # To track unique sessions
         
         # Office Hours Configuration (24h format)
         self.OFFICE_START_HOUR = 10 # 10:00 AM
         self.OFFICE_END_HOUR = 18   # Official: 6:00 PM
+        self.threads_started = False # Guard for duplicate threads
 
         # GUI Container
         self.container = ctk.CTkFrame(self)
-        self.container.pack(fill="both", expand=True, padx=20, pady=20)
+        self.container.pack(fill="both", expand=True)
 
-        # Views
-        self.login_view = self.create_login_view()
-        self.dashboard_view = self.create_dashboard_view()
-        self.compact_view = self.create_compact_view()
-
+        # UI Setup
+        self.setup_ui()
+        
         # PROTOCOLS
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # Track View State
-        self.is_compact = False
-
-        # Show Login Screen Immediately (Instant Startup)
-        self.show_login()
-        
-        # Start Auto-Login in Background
-        threading.Thread(target=self.handle_auto_login, daemon=True).start()
-             
-        # Load Persistence
-        self.load_local_stats()
-
         # Start UI Update Loop (Main Thread)
         self.update_ui_loop()
         
@@ -77,18 +73,27 @@ class TimeTrackerApp(ctk.CTk):
         self.tray_icon = None
         self.create_tray_icon()
 
+        # Auto-Login Check (after UI is set up)
+        self.check_auto_login()
+
+    def setup_ui(self):
+        """Initializes the UI components."""
+        # 1. Login View
+        self.login_view = self.create_login_view()
+        
+        # 2. Dashboard View
+        self.dashboard_view = self.create_dashboard_view()
+        
+        # 3. Compact View
+        self.compact_view = self.create_compact_view()
+
+        # Show Login initially
+        self.show_login()
+
     def is_within_working_hours(self):
         """Checks if tracking is allowed (10 AM - 6 PM)."""
         now_hour = datetime.datetime.now().hour
-        # 10 means 10:00 to 10:59 ... 17 means 17:00 to 17:59. 
-        # So we want >= 10 and < 18 (which is 6 PM)
-        is_time = self.OFFICE_START_HOUR <= now_hour < self.OFFICE_END_HOUR
-        
-        if not is_time:
-             # Just for debug/status updates
-             pass
-             
-        return is_time
+        return self.OFFICE_START_HOUR <= now_hour < self.OFFICE_END_HOUR
 
     def get_current_user_identifier(self):
         """Get a safe filename-friendly identifier for the current user."""
@@ -96,53 +101,66 @@ class TimeTrackerApp(ctk.CTk):
             return str(self.api.employee_id).replace(" ", "_")
         return "default"
 
-    def handle_auto_login(self):
-        """Worker thread to handle auto-login without blocking startup."""
-        if not os.path.exists("session.json"):
-            return
-
+    # --- CREDENTIAL MANAGEMENT ---
+    def save_creds(self, email, password):
+        """Saves credentials securely (base64 encoded simple obsfucation) for auto-login."""
         try:
-            with open("session.json", "r") as f:
-                data = json.load(f)
-                user = data.get("username")
-                pwd = data.get("password")
-            
-            if user and pwd:
-                # Show subtle status on login screen
-                self.after(0, lambda: self.lbl_error.configure(text="Auto-logging in...", text_color="orange"))
-                
-                self.api = ApiClient(base_url="https://hrms-420.netlify.app/.netlify/functions/api")
-                success, msg = self.api.login(user, pwd)
-                
-                if success:
-                    print("Auto-login successful")
-                    self.after(0, self.show_dashboard)
-                    self.after(0, self.load_local_stats)
-                    self.after(0, lambda: self.lbl_error.configure(text=""))
-                else:
-                    self.after(0, lambda: self.lbl_error.configure(text="Session expired. Please login again.", text_color="grey"))
+            import base64
+            import json
+            enc_user = base64.b64encode(email.encode()).decode()
+            enc_pass = base64.b64encode(password.encode()).decode()
+            data = {"u": enc_user, "p": enc_pass}
+            with open("user_creds.json", "w") as f:
+                json.dump(data, f)
         except Exception as e:
-            print(f"Auto-login failed: {e}")
+            print(f"Error saving creds: {e}")
 
-    def save_session(self, username, password):
-        """Save credentials locally."""
-        with open("session.json", "w") as f:
-            json.dump({"username": username, "password": password}, f)
+    def load_creds(self):
+        """Loads saved credentials."""
+        try:
+            import base64
+            import json
+            if not os.path.exists("user_creds.json"):
+                return None, None
+            
+            with open("user_creds.json", "r") as f:
+                data = json.load(f)
+            
+            email = base64.b64decode(data["u"]).decode()
+            password = base64.b64decode(data["p"]).decode()
+            return email, password
+        except:
+            return None, None
+
+    def check_auto_login(self):
+        """Attempts to auto-login if credentials exist."""
+        email, password = self.load_creds()
+        if email and password:
+            print(f"Auto-login found for {email}")
+            # Ensure UI exists before accessing
+            if hasattr(self, 'entry_user'):
+                self.entry_user.delete(0, 'end')
+                self.entry_user.insert(0, email)
+                self.entry_pass.delete(0, 'end')
+                self.entry_pass.insert(0, password)
+                # Show status
+                self.lbl_error.configure(text="Auto-logging in... (Server Waking Up)", text_color="orange")
+                self.handle_login()
 
     def logout(self):
         """Clear session and go back to login."""
-        if os.path.exists("session.json"):
-            os.remove("session.json")
+        if os.path.exists("user_creds.json"): # Clear auto-login
+            os.remove("user_creds.json")
         
         # Save current stats one last time before clearing
         self.save_local_stats()
         
         self.stop_tracking() # Ensure tracking stops if active
-        self.app_running = False # Kill the background sync thread
         
         # Reset Timers for next login
         self.total_work_seconds = 0
         self.total_idle_seconds = 0
+        self.hourly_stats = {} # Reset stats on explicit logout
         
         self.show_login()
 
@@ -371,11 +389,13 @@ class TimeTrackerApp(ctk.CTk):
         # Start the portal sync loop in background
         self.app_running = True
         
-        # Start core threads
-        threading.Thread(target=self.sync_with_portal, daemon=True).start()
-        threading.Thread(target=self.server_polling_loop, daemon=True).start()
-        threading.Thread(target=self.start_command_server, daemon=True).start()
-        self.log_msg("System: Browser Bridge Active on Port 12345")
+        # Start core threads (Guard against duplication on re-login)
+        if not self.threads_started:
+            threading.Thread(target=self.sync_with_portal, daemon=True).start()
+            threading.Thread(target=self.server_polling_loop, daemon=True).start()
+            threading.Thread(target=self.start_command_server, daemon=True).start()
+            self.threads_started = True
+            self.log_msg("System: Browser Bridge Active on Port 12345")
 
     def start_command_server(self):
         """
@@ -399,14 +419,15 @@ class TimeTrackerApp(ctk.CTk):
                     punch_in = query.get('punch_in', [None])[0]
                     punch_out = query.get('punch_out', [None])[0]
                     attendance_date = query.get('date', [None])[0]
+                    worked_str = query.get('worked', [None])[0]
                     
-                    print(f"[SYNC] Received data for {attendance_date}: In={punch_in}, Out={punch_out}")
+                    print(f"[SYNC] Received data for {attendance_date}: In={punch_in}, Out={punch_out}, Worked={worked_str}")
                     
                     # Update local bridge status
                     app_ref.after(0, lambda: app_ref.lbl_bridge.configure(text="Browser Sync: 🟢 Connected", text_color="green"))
                     
                     # Process sync on main thread
-                    app_ref.after(0, lambda: app_ref.process_sync_data(punch_in, punch_out, attendance_date))
+                    app_ref.after(0, lambda: app_ref.process_sync_data(punch_in, punch_out, attendance_date, worked_str=worked_str))
                     
                     self.send_response(200)
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -457,7 +478,7 @@ class TimeTrackerApp(ctk.CTk):
                 print(f"[BRIDGE] Critical Server Error: {e}")
                 time.sleep(5)
 
-    def process_sync_data(self, punch_in, punch_out, attendance_date, server_work_seconds=None, status=None):
+    def process_sync_data(self, punch_in, punch_out, attendance_date, server_work_seconds=None, status=None, worked_str=None):
         """Processes punch data received via bridge or polling."""
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         
@@ -466,58 +487,83 @@ class TimeTrackerApp(ctk.CTk):
             print(f"[SYNC] WARNING: Data Date '{attendance_date}' != System Date '{today_str}'. Ignoring.")
             return
 
-        print(f"[SYNC] Received - In: '{punch_in}', Out: '{punch_out}', Status: '{status}'")
+        print(f"[SYNC] Received - In: '{punch_in}', Out: '{punch_out}', Status: '{status}', Worked: '{worked_str}'")
 
         # 1. HANDLE LOGOUT (Strict Stop)
         if status == "logged_out":
             if self.tracking_active:
                 print("[SYNC] User Logged Out. Stopping Tracker.")
-                self.stop_tracking("Logged Out")
+                self.after(0, lambda: self.stop_tracking("Logged Out"))
             return
 
         # 2. HANDLE PUNCH DATA
-        invalid_vals = [None, "null", "none", "", "-", "--", "--:--", "undefined", "false"]
+        invalid_vals = [None, "null", "none", "", "-", "--", "--:--", "undefined", "false", "Active", "Working...", "LATE"]
         is_punched_in = punch_in not in invalid_vals
         is_punched_out = punch_out not in invalid_vals
 
         if is_punched_in:
-            # Check if this is a "Fresh" punch (New Session)
-            # Logic: If we are stopped, we only start if the punch is DIFFERENT from the last session's punch
-            # OR if we haven't tracked anything yet.
-            
-            is_new_punch = (punch_in != self.last_processed_punch_in)
-            
+            # 3. CHECK FOR NEW SESSION (Log context only, don't reset timers)
+            if self.last_processed_punch_in and punch_in != self.last_processed_punch_in:
+                print(f"[SYNC] New Punch In Detected ({self.last_processed_punch_in} -> {punch_in}). Resuming from daily cumulative time.")
+                self.log_msg(f"System: New punch session detected ({punch_in}). Resuming tracked time.")
+
+            # Update reference immediately (thread-safe for simple assignment)
+            self.last_processed_punch_in = punch_in
+
+            # 4. STRICT STATE ENFORCEMENT
             if is_punched_out:
                 # Case: Punched Out (Completed Session)
-                # If we are somehow tracking, STOP.
+                # Check status thread-safely? self.tracking_active is a bool, ok to read.
                 if self.tracking_active:
                      print(f"[SYNC] Punch Out Detected ({punch_out}). Stopping.")
-                     self.stop_tracking("Punched Out")
-                # Ensure we don't auto-start again for this specific punch-in time
-                self.last_processed_punch_in = punch_in 
-
-            elif not self.tracking_active:
-                # Case: Punched In, Not Tracking.
-                # Smart Resume Logic (User Request): "If user already punch in, it should run automatically"
-                # We check if the punch-in is from Today. Since we only sync Today's data, this is implicit.
-                # BUT we need to ensure we don't restart a session that was explicitly stopped by "Punch Out".
-                # Here, we are in the "is_punched_in" and NOT "is_punched_out" block. So we are officially "Active".
-                
-                # We simply allow it to start if we are not tracking.
-                print(f"[SYNC] Existing Active Punch detected ({punch_in}). Smart Resume: Starting Tracker.")
-                self.start_tracking(punch_in_time_str=punch_in)
-                self.last_processed_punch_in = punch_in
+                     # Make sure we generate the report for the session that just ended
+                     self.after(0, lambda: self.stop_tracking("Punched Out"))
             
             else:
-                # Case: Tracking Active. Sync timestamps.
-                self.sync_timers_with_punch_in(punch_in)
-                self.last_processed_punch_in = punch_in
+                # Case: Punched In + Active (Working)
+                if not self.tracking_active:
+                    print(f"[SYNC] Active Punch detected ({punch_in}). Force Starting.")
+                    self.after(0, lambda: self.start_tracking(punch_in_time_str=punch_in))
+                
+                # 5. SYNC TIMERS
+                if worked_str and worked_str not in invalid_vals:
+                    # Sync with WORKED column from HRMS (Absolute Truth)
+                    self.after(0, lambda: self.sync_timers_with_worked_str(worked_str))
+                else:
+                    # Fallback to calculated sync (Drift prone)
+                    self.after(0, lambda: self.sync_timers_with_punch_in(punch_in))
         
         else:
-            # Case: No Punch In.
+            # Case: No Punch In Data (or Invalid)
             if self.tracking_active:
                  print(f"[SYNC] No active punch detected. Stopping.")
-                 self.stop_tracking("No Data") 
+                 self.after(0, lambda: self.stop_tracking("No Data")) 
+
+    def sync_timers_with_worked_str(self, worked_str):
+        """Parses '0h 1m 9s' and updates total_work_seconds."""
+        try:
+            # Expected format: "0h 1m 9s" or "2h 30m"
+            parts = worked_str.split(' ')
+            h, m, s = 0, 0, 0
+            for p in parts:
+                p = p.lower()
+                if 'h' in p: h = int(p.replace('h',''))
+                if 'm' in p: m = int(p.replace('m',''))
+                if 's' in p: s = int(p.replace('s',''))
+            
+            server_seconds = h*3600 + m*60 + s
+            
+            # MUTUAL EXCLUSIVITY FIX:
+            # HRMS 'Worked' usually means total elapsed time. To get actual 'Work' time,
+            # we subtract our locally tracked idle seconds.
+            actual_work_seconds = max(0, server_seconds - self.total_idle_seconds)
+            
+            # Sync if drift > 5 seconds
+            if abs(actual_work_seconds - self.total_work_seconds) > 5:
+                 print(f"[SYNC] Updating Work Time (Excluding Idle): {self.total_work_seconds}s -> {actual_work_seconds}s")
+                 self.total_work_seconds = actual_work_seconds
+        except Exception as e:
+            print(f"[SYNC] Error parsing worked time '{worked_str}': {e}")
 
     def sync_timers_with_punch_in(self, punch_in_str):
         """Calculates work time based on: Current Time - Punch In - Total Idle."""
@@ -570,7 +616,7 @@ class TimeTrackerApp(ctk.CTk):
             return
 
         # UI Feedback: Show loading state
-        self.lbl_error.configure(text="Connecting to server... Please wait.", text_color="orange")
+        self.lbl_error.configure(text="Connecting... (Server Waking Up, < 60s)", text_color="orange")
         # Find the login button and disable it
         for child in self.login_view.winfo_children():
             if isinstance(child, ctk.CTkButton) and child.cget("text") == "Login":
@@ -596,12 +642,38 @@ class TimeTrackerApp(ctk.CTk):
             self.login_btn_ref.configure(state="normal", text="Login")
 
         if success:
-            self.save_session(user, password)
+            self.save_creds(user, password)
+            self.add_to_startup() # PERSISTENCE
             self.show_dashboard()
             self.load_local_stats()
             self.lbl_error.configure(text="") # Clear errors
         else:
             self.lbl_error.configure(text=msg, text_color="red")
+
+    def add_to_startup(self):
+        """Adds the application to Windows Startup via Registry."""
+        try:
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            app_name = "HRMSActivityTracker"
+            
+            # Determine path
+            if getattr(sys, 'frozen', False):
+                # Requesting executable path (PyInstaller)
+                exe_path = sys.executable
+            else:
+                # Running as script (python main.py)
+                # Use pythonw.exe to run without console if possible, but for now just python.exe is safer to find
+                # Quote paths to handle spaces in folder names!
+                exe_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+            print(f"[SYSTEM] Adding to Startup: {exe_path}")
+
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
+            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, exe_path)
+            winreg.CloseKey(key)
+            print("[SYSTEM] Successfully added to Windows Startup.")
+        except Exception as e:
+            print(f"[SYSTEM] Failed to add to startup: {e}")
 
     def log_msg(self, msg):
         # Ensure UI updates happen on the Main Thread to prevent freezing
@@ -697,13 +769,20 @@ class TimeTrackerApp(ctk.CTk):
             # --- rollover check ---
             today_str = datetime.date.today().strftime("%Y-%m-%d")
             if today_str != self.current_date:
-                self.log_msg(f"System: New day detected ({today_str}). Resetting.")
-                self.save_local_stats()
+                self.log_msg(f"System: New day detected ({today_str}). Resetting daily stats.")
+                print(f"[SYSTEM] Day Rollover: {self.current_date} -> {today_str}. Resetting counters.")
+                
+                # Full Reset for New Day
                 self.total_work_seconds = 0
                 self.total_idle_seconds = 0
+                self.hourly_stats = {}
                 self.current_date = today_str
+                self.last_processed_punch_in = None # Reset reference for new day
+                
                 self.save_local_stats()
+                # Update UI elements on main thread
                 self.after(0, self.update_chart)
+                self.after(0, lambda: self.lbl_punch_time.configure(text=""))
 
             now = time.time()
             delta = now - self.last_sync_time
@@ -753,7 +832,12 @@ class TimeTrackerApp(ctk.CTk):
 
     def start_tracking(self, punch_in_time_str=None):
         """Starts the LOCAL activity tracking."""
+        # AUTO-VISIBILITY: If already active, still ensure visibility (e.g. from Smart Resume)
         if self.tracking_active:
+             if not self.is_compact:
+                 self.toggle_compact_mode()
+             self.deiconify()
+             self.attributes('-topmost', True)
              return
 
         self.lbl_status.configure(text="PUNCHED IN (Active)", text_color="green")
@@ -769,6 +853,13 @@ class TimeTrackerApp(ctk.CTk):
         self.show_notification("HRMS EVENT: PUNCH IN DETECTED")
         self.btn_start.configure(fg_color="#006400")
 
+        # AUTO-VISIBILITY: Switch to Compact Mode and Show
+        self.after(0, self.deiconify)
+        if not self.is_compact:
+            self.after(0, self.toggle_compact_mode)
+        # Keep it topmost to be "Visually Accessible" per requirement
+        self.after(100, lambda: self.attributes('-topmost', True))
+
     def stop_tracking(self, reason="Manual"):
         """Stops the LOCAL activity tracking."""
         if not self.tracking_active:
@@ -782,6 +873,13 @@ class TimeTrackerApp(ctk.CTk):
         self.btn_stop.configure(fg_color="#1E1E1E")
         self.save_local_stats()
         self.show_notification(f"HRMS EVENT: STOPPED ({reason})")
+        
+        # UX: Disable "Always on Top" when stopped so it doesn't block user
+        self.attributes('-topmost', False)
+
+        # ACTION: Generate Report if Punched Out
+        if reason == "Punched Out":
+            self.generate_report()
 
     def load_local_stats(self):
         """Loads today's stats from JSON to preserve analytics."""
@@ -882,12 +980,23 @@ class TimeTrackerApp(ctk.CTk):
             user_id = self.api.employee_id if hasattr(self.api, 'employee_id') else "Unknown"
             role = self.api.course_role if hasattr(self.api, 'course_role') else "Employee"
             
-            work_formatted = self.format_time(self.total_work_seconds)
-            idle_formatted = self.format_time(self.total_idle_seconds)
+            # CUMULATIVE CALCULATION: Sum up hourly stats to get the true daily total
+            # This ensures that even if 'total_work_seconds' was reset for a new session,
+            # the report includes ALL work done today.
+            report_work_seconds = sum(d.get("work", 0) for d in self.hourly_stats.values())
+            report_idle_seconds = sum(d.get("idle", 0) for d in self.hourly_stats.values())
             
-            total_sec = self.total_work_seconds + self.total_idle_seconds
-            work_pct = (self.total_work_seconds / total_sec * 100) if total_sec > 0 else 0
-            idle_pct = (self.total_idle_seconds / total_sec * 100) if total_sec > 0 else 0
+            # Fallback: If hourly stats are empty (e.g. very short session < 1 min?), use current timers
+            if report_work_seconds == 0 and report_idle_seconds == 0:
+                report_work_seconds = self.total_work_seconds
+                report_idle_seconds = self.total_idle_seconds
+
+            work_formatted = self.format_time(report_work_seconds)
+            idle_formatted = self.format_time(report_idle_seconds)
+            
+            total_sec = report_work_seconds + report_idle_seconds
+            work_pct = (report_work_seconds / total_sec * 100) if total_sec > 0 else 0
+            idle_pct = (report_idle_seconds / total_sec * 100) if total_sec > 0 else 0
 
             # 2. Setup Filename
             home_dir = os.path.expanduser("~")
@@ -996,10 +1105,10 @@ class TimeTrackerApp(ctk.CTk):
             ax = fig.add_subplot(111)
             
             labels = [f'Working ({work_pct:.1f}%)', f'Idle ({idle_pct:.1f}%)']
-            sizes = [max(1, self.total_work_seconds), max(0, self.total_idle_seconds)]
+            sizes = [max(1, report_work_seconds), max(0, report_idle_seconds)]
             colors = ['#2CC985', '#FFB347']
             
-            if self.total_work_seconds == 0 and self.total_idle_seconds == 0:
+            if report_work_seconds == 0 and report_idle_seconds == 0:
                 sizes = [1]
                 labels = ["No Data"]
                 colors = ["#CCCCCC"]

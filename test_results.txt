@@ -1,0 +1,13 @@
+Test Next-Day Reset: PASSED
+[SYNC] Received - In: '10:00 AM', Out: 'None', Status: 'None', Worked: 'None'
+[SYNC] Active Punch detected (10:00 AM). Force Starting.
+[SYNC] Received - In: '10:00 AM', Out: '10:05 AM', Status: 'None', Worked: 'None'
+[SYNC] Received - In: '11:00 AM', Out: 'None', Status: 'None', Worked: 'None'
+[SYNC] New Punch In Detected (10:00 AM -> 11:00 AM). Resuming from daily cumulative time.
+[SYNC] Active Punch detected (11:00 AM). Force Starting.
+Test Same-Day Resume: PASSED
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.008s
+
+OK
