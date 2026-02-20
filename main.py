@@ -5,9 +5,13 @@ import tkinter
 import os
 import json
 import datetime
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
+import json
+import datetime
+
+# Lazy imports for performance
+# from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+# from matplotlib.figure import Figure
+# import matplotlib.pyplot as plt
 
 from tracker import ActivityTracker
 from api_client import ApiClient
@@ -16,65 +20,97 @@ from PIL import Image, ImageDraw
 import sys
 import winreg
 
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+import logging
+
+# ... (imports)
 
 class TimeTrackerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        # Window Setup
-        self.title("Activity Tracker v2.2")
-        self.geometry("600x800")
-        self.resizable(False, False)
-        
-        # State
-        self.is_compact = False
-        self.tracking_active = False
-        self.start_time = None
-        self.total_work_seconds = 0
-        self.total_idle_seconds = 0
-        self.current_date = datetime.date.today().strftime("%Y-%m-%d")
-        
-        # Sync State
-        self.last_processed_punch_in = None
-        
-        # Analytics
-        self.hourly_stats = {} # Format: "09": {"work": 0, "idle": 0}
-        self.load_local_stats()
-        
-        # Logic Components
-        self.target_seconds = 8 * 3600 # 8 Hours
-        self.current_state = "WAITING"
-        self.tracker = ActivityTracker(idle_threshold_seconds=10) # 10 Seconds per User Request
-        self.api = ApiClient("https://hrms-420.netlify.app/.netlify/functions/api") # Prod URL
-        self.app_running = True # Control flag for background threads
-        self.last_sync_time = time.time() # For high-precision deltas
-        
-        # Office Hours Configuration (24h format)
-        self.OFFICE_START_HOUR = 10 # 10:00 AM
-        self.OFFICE_END_HOUR = 18   # Official: 6:00 PM
-        self.threads_started = False # Guard for duplicate threads
+        # Setup Logging
+        try:
+            self.log_file = self.get_app_path("debug.log")
+            logging.basicConfig(filename=self.log_file, level=logging.INFO, 
+                                format='%(asctime)s - %(levelname)s - %(message)s')
+            logging.info("Application Started")
+        except Exception as e:
+            print(f"Logging setup failed: {e}")
 
-        # GUI Container
-        self.container = ctk.CTkFrame(self)
-        self.container.pack(fill="both", expand=True)
+        try:
+            # Window Setup
+            logging.info("Setting up Window...")
+            self.title("Activity Tracker v2.2")
+            self.geometry("600x800")
+            self.resizable(False, False)
+            
+            # State
+            logging.info("Initializing State...")
+            self.is_compact = False
+            self.tracking_active = False
+            self.start_time = None
+            self.total_work_seconds = 0
+            self.total_idle_seconds = 0
+            self.current_date = datetime.date.today().strftime("%Y-%m-%d")
+            
+            # Sync State
+            self.last_processed_punch_in = None
+            
+            # Analytics
+            self.hourly_stats = {} 
+            self.load_local_stats()
+            
+            # Logic Components
+            logging.info("Initializing Logic Components...")
+            self.target_seconds = 8 * 3600 # 8 Hours
+            self.current_state = "WAITING"
+            self.tracker = ActivityTracker(idle_threshold_seconds=10) 
+            self.api = ApiClient("https://hrms-420.netlify.app/.netlify/functions/api")
+            self.app_running = True
+            self.last_sync_time = time.time()
+            
+            # Office Hours Configuration
+            self.OFFICE_START_HOUR = 10 
+            self.OFFICE_END_HOUR = 18   
+            self.threads_started = False 
+            
+            # GUI
+            logging.info("Creating GUI Container...")
+            self.container = ctk.CTkFrame(self)
+            self.container.pack(fill="both", expand=True)
+            
+            # UI Setup
+            logging.info("Calling setup_ui()...")
+            self.setup_ui()
+            logging.info("setup_ui() completed.")
+            
+            # Protocols
+            self.protocol("WM_DELETE_WINDOW", self.on_closing)
+            self.update_ui_loop()
+            
+            # Tray
+            logging.info("Creating Tray Icon...")
+            self.tray_icon = None
+            self.create_tray_icon()
+            
+            # Login
+            logging.info("Checking Launch Arguments...")
+            is_startup_launch = "--startup" in sys.argv
+            if is_startup_launch:
+                print("[SYSTEM] Detected Automatic Startup. Launching in Tray.")
+                logging.info("Startup Mode: TRUE")
+            
+            logging.info("Calling check_auto_login()...")
+            self.check_auto_login(startup=is_startup_launch)
 
-        # UI Setup
-        self.setup_ui()
-        
-        # PROTOCOLS
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Start UI Update Loop (Main Thread)
-        self.update_ui_loop()
-        
-        # System Tray Component
-        self.tray_icon = None
-        self.create_tray_icon()
+            logging.info("Initialization Complete - Loop Running.")
 
-        # Auto-Login Check (after UI is set up)
-        self.check_auto_login()
+        except Exception as e:
+            logging.critical(f"CRASH DURING STARTUP: {e}", exc_info=True)
+            print(f"CRASH: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
     def setup_ui(self):
         """Initializes the UI components."""
@@ -82,7 +118,8 @@ class TimeTrackerApp(ctk.CTk):
         self.login_view = self.create_login_view()
         
         # 2. Dashboard View
-        self.dashboard_view = self.create_dashboard_view()
+        # 2. Dashboard View (Lazy Loading for Startup Speed)
+        self.dashboard_view = None
         
         # 3. Compact View
         self.compact_view = self.create_compact_view()
@@ -101,6 +138,16 @@ class TimeTrackerApp(ctk.CTk):
             return str(self.api.employee_id).replace(" ", "_")
         return "default"
 
+    def get_app_path(self, filename):
+        """Returns the absolute path for a file relative to the executable."""
+        if getattr(sys, 'frozen', False):
+            # Running as compiled .exe
+            base_path = os.path.dirname(sys.executable)
+        else:
+            # Running as .py script
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_path, filename)
+
     # --- CREDENTIAL MANAGEMENT ---
     def save_creds(self, email, password):
         """Saves credentials securely (base64 encoded simple obsfucation) for auto-login."""
@@ -110,7 +157,8 @@ class TimeTrackerApp(ctk.CTk):
             enc_user = base64.b64encode(email.encode()).decode()
             enc_pass = base64.b64encode(password.encode()).decode()
             data = {"u": enc_user, "p": enc_pass}
-            with open("user_creds.json", "w") as f:
+            file_path = self.get_app_path("user_creds.json")
+            with open(file_path, "w") as f:
                 json.dump(data, f)
         except Exception as e:
             print(f"Error saving creds: {e}")
@@ -120,10 +168,11 @@ class TimeTrackerApp(ctk.CTk):
         try:
             import base64
             import json
-            if not os.path.exists("user_creds.json"):
+            file_path = self.get_app_path("user_creds.json")
+            if not os.path.exists(file_path):
                 return None, None
             
-            with open("user_creds.json", "r") as f:
+            with open(file_path, "r") as f:
                 data = json.load(f)
             
             email = base64.b64decode(data["u"]).decode()
@@ -132,11 +181,13 @@ class TimeTrackerApp(ctk.CTk):
         except:
             return None, None
 
-    def check_auto_login(self):
-        """Attempts to auto-login if credentials exist."""
+    def check_auto_login(self, startup=True):
+        """Attempts to auto-login if credentials exist. Startup=True means Minimize to Tray."""
+        self.startup_mode = startup
+        logging.info(f"Checking Auto Login. Startup Mode: {startup}")
         email, password = self.load_creds()
         if email and password:
-            print(f"Auto-login found for {email}")
+            logging.info("Credentials found. Attempting Auto-Login.")
             # Ensure UI exists before accessing
             if hasattr(self, 'entry_user'):
                 self.entry_user.delete(0, 'end')
@@ -145,12 +196,48 @@ class TimeTrackerApp(ctk.CTk):
                 self.entry_pass.insert(0, password)
                 # Show status
                 self.lbl_error.configure(text="Auto-logging in... (Server Waking Up)", text_color="orange")
-                self.handle_login()
+                self.handle_login(silent=startup)
+        else:
+            logging.info("No Credentials found. Showing Login Screen.")
+
+    def handle_login(self, silent=False):
+        """Triggers the login process in a background thread."""
+        user = self.entry_user.get()
+        password = self.entry_pass.get()
+        
+        self.is_silent_login = silent # Store state for result handler
+        logging.info(f"Starting Login Process for user: {user} (Silent={silent})")
+        
+        if not user or not password:
+            self.lbl_error.configure(text="Please enter both email and password")
+            return
+
+        # UI Feedback: Show loading state
+        self.lbl_error.configure(text="Connecting... (Server Waking Up, < 60s)", text_color="orange")
+        for child in self.login_view.winfo_children():
+            if isinstance(child, ctk.CTkButton) and child.cget("text") == "Login":
+                child.configure(state="disabled", text="Logging in...")
+                self.login_btn_ref = child
+
+        # Start Login Thread
+        threading.Thread(target=self._do_login_thread, args=(user, password), daemon=True).start()
+
+    def _do_login_thread(self, user, password):
+        """Background thread logic for authentication."""
+        url = "https://hrms-420.netlify.app/.netlify/functions/api"
+        logging.info("Contacting Login API...")
+        self.api = ApiClient(url)
+        success, msg = self.api.login(user, password)
+        logging.info(f"Login API Result: Success={success}, Msg={msg}")
+
+        # Update UI back on the Main Thread
+        self.after(0, lambda: self._handle_login_result(success, msg, user, password))
 
     def logout(self):
         """Clear session and go back to login."""
-        if os.path.exists("user_creds.json"): # Clear auto-login
-            os.remove("user_creds.json")
+        creds_path = self.get_app_path("user_creds.json")
+        if os.path.exists(creds_path): # Clear auto-login
+            os.remove(creds_path)
         
         # Save current stats one last time before clearing
         self.save_local_stats()
@@ -248,6 +335,10 @@ class TimeTrackerApp(ctk.CTk):
         return frame
 
     def create_dashboard_view(self):
+        # Lazy Import heavy dependencies
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+
         frame = ctk.CTkFrame(self.container, fg_color="transparent")
         
         # Logout Button (Top Right)
@@ -373,10 +464,15 @@ class TimeTrackerApp(ctk.CTk):
             self.is_compact = False
 
     def show_login(self):
-        self.dashboard_view.pack_forget()
+        if self.dashboard_view:
+            self.dashboard_view.pack_forget()
         self.login_view.pack(fill="both", expand=True)
 
     def show_dashboard(self):
+        # Lazy Load View
+        if self.dashboard_view is None:
+            self.dashboard_view = self.create_dashboard_view()
+
         self.login_view.pack_forget()
         self.dashboard_view.pack(fill="both", expand=True)
         
@@ -606,26 +702,6 @@ class TimeTrackerApp(ctk.CTk):
         except Exception as e:
             print(f"[SYNC] Time Sync Error: {e} for string '{punch_in_str}'")
 
-    def handle_login(self):
-        """Triggers the login process in a background thread to prevent UI freezing."""
-        user = self.entry_user.get()
-        password = self.entry_pass.get()
-        
-        if not user or not password:
-            self.lbl_error.configure(text="Please enter both email and password")
-            return
-
-        # UI Feedback: Show loading state
-        self.lbl_error.configure(text="Connecting... (Server Waking Up, < 60s)", text_color="orange")
-        # Find the login button and disable it
-        for child in self.login_view.winfo_children():
-            if isinstance(child, ctk.CTkButton) and child.cget("text") == "Login":
-                child.configure(state="disabled", text="Logging in...")
-                self.login_btn_ref = child
-
-        # Start Login Thread
-        threading.Thread(target=self._do_login_thread, args=(user, password), daemon=True).start()
-
     def _do_login_thread(self, user, password):
         """Background thread logic for authentication."""
         url = "https://hrms-420.netlify.app/.netlify/functions/api"
@@ -644,9 +720,21 @@ class TimeTrackerApp(ctk.CTk):
         if success:
             self.save_creds(user, password)
             self.add_to_startup() # PERSISTENCE
+            
+            # Switch view first so it is ready
             self.show_dashboard()
             self.load_local_stats()
             self.lbl_error.configure(text="") # Clear errors
+            
+            # If auto-login, start minimized
+            if hasattr(self, 'is_silent_login') and self.is_silent_login:
+                print("Silent Login: Minimizing to Tray.")
+                self.withdraw() # Minimizes/Hides the window
+                if self.tray_icon and hasattr(self.tray_icon, 'notify'):
+                    try:
+                        self.tray_icon.notify("Ready (Running in Background)", "Activity Tracker")
+                    except: pass
+            
         else:
             self.lbl_error.configure(text=msg, text_color="red")
 
@@ -659,18 +747,23 @@ class TimeTrackerApp(ctk.CTk):
             # Determine path
             if getattr(sys, 'frozen', False):
                 # Requesting executable path (PyInstaller)
-                exe_path = sys.executable
+                exe_path = f'"{sys.executable}"'
             else:
                 # Running as script (python main.py)
-                # Use pythonw.exe to run without console if possible, but for now just python.exe is safer to find
-                # Quote paths to handle spaces in folder names!
                 exe_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
 
+            logging.info(f"Adding to Startup: {exe_path}")
             print(f"[SYSTEM] Adding to Startup: {exe_path}")
 
+            # Append --startup flag for silent boot
+            startup_path = f'{exe_path} --startup'
+            
+            logging.info(f"Registry Key Value: {startup_path}")
+
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
-            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, exe_path)
+            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, startup_path)
             winreg.CloseKey(key)
+            logging.info("Successfully added to Registry Run Key.")
             print("[SYSTEM] Successfully added to Windows Startup.")
         except Exception as e:
             print(f"[SYSTEM] Failed to add to startup: {e}")
@@ -692,34 +785,39 @@ class TimeTrackerApp(ctk.CTk):
 
     def update_ui_loop(self):
         """Called every second by Tkinter main loop to refresh stats/charts."""
-        # Update Main Status Label safely
-        if self.tracking_active:
-             color = "green" if self.current_state == "WORKING" else "orange"
-             self.lbl_status.configure(text=self.current_state, text_color=color)
-             # Update Compact Status too
-             self.lbl_compact_status.configure(text=self.current_state, text_color=color)
-        else:
-             self.lbl_status.configure(text="OFF THE CLOCK", text_color="grey")
-             self.lbl_compact_status.configure(text="OFFLINE", text_color="grey")
-
-        # Just show totals
         work_str = self.format_time(self.total_work_seconds)
         idle_str = self.format_time(self.total_idle_seconds)
-        
-        self.btn_start.configure(text=f"WORK TIME\n\n{work_str}")
-        self.btn_stop.configure(text=f"IDLE TIME\n\n{idle_str}")
-        
-        # Update Compact Labels
-        self.lbl_compact_work.configure(text=work_str)
-        self.lbl_compact_idle.configure(text=f"Idle: {idle_str}")
-        
-        # Update progress
-        progress = self.total_work_seconds / self.target_seconds
-        self.progress_bar.set(min(progress, 1.0))
-        
-        # Update Chart (Throttle to every 30s)
-        if int(time.time()) % 30 == 0 and self.tracking_active:
-            self.update_chart()
+
+        # 1. Update Compact View (Always Available)
+        if hasattr(self, 'compact_view') and self.compact_view:
+             if self.tracking_active:
+                  color = "green" if self.current_state == "WORKING" else "orange"
+                  self.lbl_compact_status.configure(text=self.current_state, text_color=color)
+             else:
+                  self.lbl_compact_status.configure(text="OFFLINE", text_color="grey")
+             
+             self.lbl_compact_work.configure(text=work_str)
+             self.lbl_compact_idle.configure(text=f"Idle: {idle_str}")
+
+        # 2. Update Dashboard View (Only if Active)
+        if hasattr(self, 'dashboard_view') and self.dashboard_view:
+             if self.tracking_active:
+                  color = "green" if self.current_state == "WORKING" else "orange"
+                  self.lbl_status.configure(text=self.current_state, text_color=color)
+             else:
+                  self.lbl_status.configure(text="OFF THE CLOCK", text_color="grey")
+             
+             self.btn_start.configure(text=f"WORK TIME\n\n{work_str}")
+             self.btn_stop.configure(text=f"IDLE TIME\n\n{idle_str}")
+             
+             # Update progress
+             if self.target_seconds > 0:
+                 progress = self.total_work_seconds / self.target_seconds
+                 self.progress_bar.set(min(progress, 1.0))
+             
+             # Update Chart (Throttle to every 30s)
+             if int(time.time()) % 30 == 0 and self.tracking_active:
+                 self.update_chart()
 
         self.after(1000, self.update_ui_loop) # Reschedule
 
@@ -890,9 +988,10 @@ class TimeTrackerApp(ctk.CTk):
             today_str = datetime.date.today().strftime("%Y-%m-%d")
             user_id = self.get_current_user_identifier()
             filename = f"daily_stats_{user_id}.json"
+            file_path = self.get_app_path(filename)
             
-            if os.path.exists(filename):
-                with open(filename, "r") as f:
+            if os.path.exists(file_path):
+                with open(file_path, "r") as f:
                     data = json.load(f)
                 if data.get("date") == today_str:
                     self.total_work_seconds = data.get("work", 0)
@@ -919,6 +1018,7 @@ class TimeTrackerApp(ctk.CTk):
             today_str = datetime.date.today().strftime("%Y-%m-%d")
             user_id = self.get_current_user_identifier()
             filename = f"daily_stats_{user_id}.json"
+            file_path = self.get_app_path(filename)
             
             data = {
                 "date": today_str,
@@ -926,7 +1026,7 @@ class TimeTrackerApp(ctk.CTk):
                 "idle": self.total_idle_seconds,
                 "hourly": self.hourly_stats
             }
-            with open(filename, "w") as f:
+            with open(file_path, "w") as f:
                 json.dump(data, f)
         except:
             pass
@@ -974,6 +1074,7 @@ class TimeTrackerApp(ctk.CTk):
             from reportlab.pdfgen import canvas
             from reportlab.lib.utils import ImageReader
             import io
+            from matplotlib.figure import Figure # Lazy Import
 
             # 1. Create Data
             today_str = datetime.date.today().strftime("%d-%b-%Y")

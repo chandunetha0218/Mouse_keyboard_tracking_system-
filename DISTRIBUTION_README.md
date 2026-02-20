@@ -1,31 +1,51 @@
-# HRMS Time Tracker - Setup Guide
+# How to Distribute the Activity Tracker Application
 
-This guide explains how to set up the **Time Tracker Application** on your computer.
+## Overview
+To share this application, you will create a standalone **folder** that contains the application and all its dependencies. This method (Directory Mode) ensures the application **starts instantly** compared to a single file.
 
 ## Prerequisites
-- A Windows Computer (Laptop/Desktop)
-- Google Chrome (or any browser supporting Tampermonkey)
+1.  Ensure you have **Python** installed.
+2.  Ensure you have installed the requirements:
+    ```powershell
+    pip install -r requirements.txt
+    pip install pyinstaller
+    ```
 
-## Step 1: Install the Desktop App
-1.  Download the `HRMS_Time_Tracker.exe` file.
-2.  Move it to a permanent folder (e.g., `Documents\TimeTracker`).
-3.  Right-click -> **Create Shortcut** (Optional, for easy access).
-4.  Double-click to run. You might see a "Windows Defender" warning. Click **More Info** -> **Run Anyway**.
-5.  Login with your regular credentials.
+## Step 1: Build the Application
+Open your terminal in the project folder and run:
 
-## Step 2: Install Browser Extension
-1.  Open Chrome and search for **Tampermonkey Extension**.
-2.  Install it.
-3.  Click the Extension Icon -> **Create a new script**.
-4.  Delete *everything* in the editor.
-5.  Copy-Paste the code from `tampermonkey_script_v5.0_final.js` (provided with this app).
-6.  Click **File** -> **Save**.
+```powershell
+pyinstaller HRMS_Time_Tracker.spec
+```
 
-## How it Works (Zero Touch)
-1.  **Punch In** on the HRMS Portal.
-2.  The Tracker will **Automatically Start** (It might take 10-15 seconds to sync).
-3.  **Punch Out** or **Logout** stops the tracker.
+This will create a `dist` folder.
+Inside `dist`, you will find a folder named `HRMS_Time_Tracker`. This folder contains the executable and necessary files.
 
-## Troubleshooting
-- **Not Syncing?** Make sure you are on the "Attendance" page in HRMS.
-- **App Closed?** Just open `.exe` again. If you are already punched in for the day, it will auto-resume.
+## Step 2: Prepare the Distribution Package
+Create a ZIP file of the `HRMS_Time_Tracker` folder found in `dist`.
+Send this **ZIP file** to your users along with the Tampermonkey script.
+
+## Step 3: Deployment Instructions for Users
+
+Send the ZIP file to your users with these instructions:
+
+### 1. Install the Browser Script
+1.  Install the **Tampermonkey** extension for Chrome/Edge.
+2.  Create a new script, paste the contents of `tampermonkey_script_v5.0_final.js`, and save.
+
+### 2. Run the Desktop App
+1.  Unzip the folder to a permanent location (e.g., `Documents`).
+2.  Open the folder and double-click `HRMS_Time_Tracker.exe`.
+3.  **Login** with your email and password.
+4.  The app will minimize to the System Tray and start automatically on future restarts.
+
+### 3. Usage
+- Go to the HRMS Portal and punch in.
+- The tracker will detect your punch-in and start tracking automatically.
+- Just allow the app to run in the background.
+
+## Support
+If the app fails to start, check the `debug.log` file created in the folder.
+It contains details on startup errors or path issues.
+
+The app is configured for "Instant Startup" mode, so it should appear login screen within 1-2 seconds.
