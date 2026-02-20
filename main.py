@@ -585,11 +585,9 @@ class TimeTrackerApp(ctk.CTk):
 
         print(f"[SYNC] Received - In: '{punch_in}', Out: '{punch_out}', Status: '{status}', Worked: '{worked_str}'")
 
-        # 1. HANDLE LOGOUT (Strict Stop)
+        # 1. HANDLE LOGOUT (Ignore logic - Timer must NEVER depend on browser activity)
         if status == "logged_out":
-            if self.tracking_active:
-                print("[SYNC] User Logged Out. Stopping Tracker.")
-                self.after(0, lambda: self.stop_tracking("Logged Out"))
+            print("[SYNC] User Logged Out signal received from bridge. Ignoring to preserve Server persistence.")
             return
 
         # 2. HANDLE PUNCH DATA
@@ -606,14 +604,48 @@ class TimeTrackerApp(ctk.CTk):
             # Update reference immediately (thread-safe for simple assignment)
             self.last_processed_punch_in = punch_in
 
+            import dateutil.parser as dparser
+            now = datetime.datetime.now()
+            try:
+                punch_dt = dparser.parse(punch_in, default=now)
+            except:
+                try:
+                    pts = punch_in.split(':')
+                    punch_dt = now.replace(hour=int(pts[0]), minute=int(pts[1]), second=int(pts[2]) if len(pts)>2 else 0, microsecond=0)
+                except:
+                    punch_dt = now
+
+            office_start_time = now.replace(hour=self.OFFICE_START_HOUR, minute=0, second=0, microsecond=0)
+            office_end_time = now.replace(hour=self.OFFICE_END_HOUR, minute=0, second=0, microsecond=0)
+
+            # If user punches in after 6:00 PM: Do NOT start timer. Working time = 0.
+            if punch_dt >= office_end_time:
+                if self.tracking_active:
+                    self.after(0, lambda: self.stop_tracking("Punched In After 6 PM"))
+                self.total_work_seconds = 0
+                return
+
+            # Timer must automatically stop at exactly 6:00 PM
+            if now >= office_end_time:
+                if self.tracking_active:
+                    self.after(0, lambda: self.stop_tracking("Auto Stop at 6 PM"))
+                self.after(0, lambda: self.sync_timers_with_punch_in(punch_in))
+                return
+
+            # Timer must automatically start at exactly 10:00 AM, if punched in before do not start immediately
+            if now < office_start_time:
+                self.after(0, lambda: self.sync_timers_with_punch_in(punch_in))
+                return
+
             # 4. STRICT STATE ENFORCEMENT
             if is_punched_out:
                 # Case: Punched Out (Completed Session)
-                # Check status thread-safely? self.tracking_active is a bool, ok to read.
                 if self.tracking_active:
                      print(f"[SYNC] Punch Out Detected ({punch_out}). Stopping.")
                      # Make sure we generate the report for the session that just ended
                      self.after(0, lambda: self.stop_tracking("Punched Out"))
+                
+                self.after(0, lambda: self.sync_timers_with_punch_in(punch_in, punch_out_str=punch_out))
             
             else:
                 # Case: Punched In + Active (Working)
@@ -622,18 +654,13 @@ class TimeTrackerApp(ctk.CTk):
                     self.after(0, lambda: self.start_tracking(punch_in_time_str=punch_in))
                 
                 # 5. SYNC TIMERS
-                if worked_str and worked_str not in invalid_vals:
-                    # Sync with WORKED column from HRMS (Absolute Truth)
-                    self.after(0, lambda: self.sync_timers_with_worked_str(worked_str))
-                else:
-                    # Fallback to calculated sync (Drift prone)
-                    self.after(0, lambda: self.sync_timers_with_punch_in(punch_in))
+                # We strictly use our own calculated logic based on standard hours
+                self.after(0, lambda: self.sync_timers_with_punch_in(punch_in))
         
         else:
             # Case: No Punch In Data (or Invalid)
-            if self.tracking_active:
-                 print(f"[SYNC] No active punch detected. Stopping.")
-                 self.after(0, lambda: self.stop_tracking("No Data")) 
+            # CRITICAL PERSISTENCE: Never stop the tracker just because the frontend didn't send active data
+            pass
 
     def sync_timers_with_worked_str(self, worked_str):
         """Parses '0h 1m 9s' and updates total_work_seconds."""
@@ -661,12 +688,11 @@ class TimeTrackerApp(ctk.CTk):
         except Exception as e:
             print(f"[SYNC] Error parsing worked time '{worked_str}': {e}")
 
-    def sync_timers_with_punch_in(self, punch_in_str):
-        """Calculates work time based on: Current Time - Punch In - Total Idle."""
+    def sync_timers_with_punch_in(self, punch_in_str, punch_out_str=None):
+        """Calculates work time based on: MAX(PunchIn, 10:00) and MIN(PunchOut OR 6:00 PM, 6:00 PM)."""
         try:
             # Parse HRMS Punch In Time
             import dateutil.parser as dparser
-            # If it's just a time like "14:10", parse result will have today's date if we provide a default
             now = datetime.datetime.now()
             
             # Robust parsing with default for today
@@ -684,20 +710,45 @@ class TimeTrackerApp(ctk.CTk):
                 else:
                     raise pe
 
-            # Ensure precision
-            elapsed_total = (now - punch_dt).total_seconds()
-            
-            # Work Time = Elapsed - Total Idle (Accrued locally)
-            calculated_work = max(0, elapsed_total - self.total_idle_seconds)
-            
-            # Log the calculation for debugging
-            # print(f"[DEBUG] Sync Calc: Now={now.strftime('%H:%M:%S')}, Punch={punch_dt.strftime('%H:%M:%S')}, Elapsed={int(elapsed_total)}s, Local_Idle={int(self.total_idle_seconds)}s -> Work={int(calculated_work)}s")
+            # Parse HRMS Punch Out Time if provided
+            last_event_dt = now
+            if punch_out_str:
+                try:
+                    last_event_dt = dparser.parse(punch_out_str, default=now)
+                except Exception as pe:
+                    pts = punch_out_str.split(':')
+                    if len(pts) >= 2:
+                        h = int(pts[0])
+                        m = int(pts[1])
+                        s = int(pts[2]) if len(pts) > 2 else 0
+                        last_event_dt = now.replace(hour=h, minute=m, second=s, microsecond=0)
 
-            # Only update if there's a significant difference (Sync) or if we are at 0
-            # Only update if there's a significant difference (Sync) or if we are at 0
-            if self.total_work_seconds == 0 or abs(calculated_work - self.total_work_seconds) > 300:
-                 print(f"[SYNC] Adjusting Timer: Local={self.total_work_seconds}s -> ServerCalc={calculated_work}s")
-                 self.total_work_seconds = calculated_work
+            office_start_time = now.replace(hour=self.OFFICE_START_HOUR, minute=0, second=0, microsecond=0)
+            office_end_time = now.replace(hour=self.OFFICE_END_HOUR, minute=0, second=0, microsecond=0)
+
+            # Working Start Time = MAX(PunchInTime, 10:00 AM)
+            working_start_time = max(punch_dt, office_start_time)
+            
+            # Working End Time = MIN(PunchOutTime OR 6:00 PM, 6:00 PM)
+            working_end_time = min(last_event_dt, office_end_time)
+
+            if working_start_time >= office_end_time:
+                # If Working Start Time < 6:00 PM is false
+                calculated_work = 0
+            else:
+                elapsed_total = (working_end_time - working_start_time).total_seconds()
+                
+                # 2️⃣ Persistence Rule (CRITICAL)
+                # Time calculation must be based on: Current Server Time – Effective Start Time
+                # Do NOT depend on frontend timers (no setInterval-based logic for work flow)
+                calculated_work = max(0, elapsed_total - self.total_idle_seconds)
+
+            self.total_work_seconds = calculated_work
+                 
+            # Stop immediately if it's past 6 PM based on Daily Hard Stop Rule
+            if now >= office_end_time and self.tracking_active:
+                print("[SYNC] Past 6:00 PM. Hard Stopping Locally.")
+                self.after(0, lambda: self.stop_tracking("Hard Limit 6 PM"))
                 
         except Exception as e:
             print(f"[SYNC] Time Sync Error: {e} for string '{punch_in_str}'")
@@ -785,39 +836,49 @@ class TimeTrackerApp(ctk.CTk):
 
     def update_ui_loop(self):
         """Called every second by Tkinter main loop to refresh stats/charts."""
+        if not self.app_running:
+             return
+             
+        if self.tracking_active and self.last_processed_punch_in:
+             self.sync_timers_with_punch_in(self.last_processed_punch_in)
+             
         work_str = self.format_time(self.total_work_seconds)
         idle_str = self.format_time(self.total_idle_seconds)
 
         # 1. Update Compact View (Always Available)
-        if hasattr(self, 'compact_view') and self.compact_view:
-             if self.tracking_active:
-                  color = "green" if self.current_state == "WORKING" else "orange"
-                  self.lbl_compact_status.configure(text=self.current_state, text_color=color)
-             else:
-                  self.lbl_compact_status.configure(text="OFFLINE", text_color="grey")
-             
-             self.lbl_compact_work.configure(text=work_str)
-             self.lbl_compact_idle.configure(text=f"Idle: {idle_str}")
+        try:
+             if hasattr(self, 'compact_view') and self.compact_view:
+                  if self.tracking_active:
+                       color = "green" if self.current_state == "WORKING" else "orange"
+                       self.lbl_compact_status.configure(text=self.current_state, text_color=color)
+                  else:
+                       self.lbl_compact_status.configure(text="OFFLINE", text_color="grey")
+                  
+                  self.lbl_compact_work.configure(text=work_str)
+                  self.lbl_compact_idle.configure(text=f"Idle: {idle_str}")
 
-        # 2. Update Dashboard View (Only if Active)
-        if hasattr(self, 'dashboard_view') and self.dashboard_view:
-             if self.tracking_active:
-                  color = "green" if self.current_state == "WORKING" else "orange"
-                  self.lbl_status.configure(text=self.current_state, text_color=color)
-             else:
-                  self.lbl_status.configure(text="OFF THE CLOCK", text_color="grey")
-             
-             self.btn_start.configure(text=f"WORK TIME\n\n{work_str}")
-             self.btn_stop.configure(text=f"IDLE TIME\n\n{idle_str}")
-             
-             # Update progress
-             if self.target_seconds > 0:
-                 progress = self.total_work_seconds / self.target_seconds
-                 self.progress_bar.set(min(progress, 1.0))
-             
-             # Update Chart (Throttle to every 30s)
-             if int(time.time()) % 30 == 0 and self.tracking_active:
-                 self.update_chart()
+             # 2. Update Dashboard View (Only if Active)
+             if hasattr(self, 'dashboard_view') and self.dashboard_view:
+                  if self.tracking_active:
+                       color = "green" if self.current_state == "WORKING" else "orange"
+                       self.lbl_status.configure(text=self.current_state, text_color=color)
+                  else:
+                       self.lbl_status.configure(text="OFF THE CLOCK", text_color="grey")
+                  
+                  self.btn_start.configure(text=f"WORK TIME\n\n{work_str}")
+                  self.btn_stop.configure(text=f"IDLE TIME\n\n{idle_str}")
+                  
+                  # Update progress
+                  if self.target_seconds > 0:
+                      progress = self.total_work_seconds / self.target_seconds
+                      self.progress_bar.set(min(progress, 1.0))
+                  
+                  # Update Chart (Throttle to every 30s)
+                  if int(time.time()) % 30 == 0 and self.tracking_active:
+                      self.update_chart()
+
+        except Exception as e:
+             pass
 
         self.after(1000, self.update_ui_loop) # Reschedule
 
@@ -898,25 +959,20 @@ class TimeTrackerApp(ctk.CTk):
                         self.current_state = "AFTER HOURS (Paused)"
                     else:
                         self.current_state = state
-                    
-                    # ONLY ACCUMULATE TIME IF WITHIN 10 AM - 6 PM
-                    if working_hours:
-                        hour_key = datetime.datetime.now().strftime("%H") # e.g. "09", "10"
-                        if hour_key not in self.hourly_stats:
-                            self.hourly_stats[hour_key] = {"work": 0, "idle": 0}
-
-                        if state == "WORKING":
-                            self.total_work_seconds += delta
-                            self.hourly_stats[hour_key]["work"] += delta
-                        else:
-                            self.total_idle_seconds += delta
-                            self.hourly_stats[hour_key]["idle"] += delta
+                        
+                    # ONLY ACCUMULATE IDLE NATIVELY (Work is calculated rigidly against server-time)
+                    if working_hours and state == "IDLE":
+                        self.total_idle_seconds += delta
                     
                     # Upload Heartbeat (Every ~30 seconds)
-                    # We still upload heartbeat to keep session alive, but maybe with "IDLE" or special status?
                     if int(now) % 30 == 0: 
                          status_to_send = state if working_hours else "OUT_OF_HOURS"
                          threading.Thread(target=self.api.upload_activity_log, args=(status_to_send, 30), daemon=True).start()
+                
+                # Check Hard Limit internally
+                office_end_time = datetime.datetime.now().replace(hour=self.OFFICE_END_HOUR, minute=0, second=0, microsecond=0)
+                if datetime.datetime.now() >= office_end_time and self.tracking_active:
+                     self.after(0, lambda: self.stop_tracking("Hard Limit 6 PM"))
                 
                 # Background Persistence (Every ~10 seconds)
                 if int(now) % 10 == 0:
