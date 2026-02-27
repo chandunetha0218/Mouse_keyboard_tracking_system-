@@ -181,12 +181,12 @@
                     onload: () => {
                         let display = `In: ${pIn}`;
                         if (pOut) {
-                             display += ` | Out: ${pOut}`;
+                            display += ` | Out: ${pOut}`;
                         } else {
-                             display += ` | Running...`;
+                            display += ` | Running...`;
                         }
                         if (pWork) display += ` | Worked: ${pWork}`;
-                        
+
                         updateStatus(display, pOut ? "#FFA500" : "#00C851"); // Orange if Out, Green if In
                         isConnected = true;
                     },

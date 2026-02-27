@@ -23,21 +23,32 @@ class ActivityTracker:
         self.last_keypress_time = 0
 
     def _on_move(self, x, y):
-        # Ignore small movements (Jitter)
-        import math
-        dist = math.hypot(x - self.last_x, y - self.last_y)
-        if dist < 5: # 5 Pixel Threshold (More Sensitive)
-             return
-             
-        self.last_x = x
-        self.last_y = y
-        self._update_activity()
+        try:
+            if x is None or y is None: 
+                return
+            import math
+            dist = math.hypot(x - self.last_x, y - self.last_y)
+            # 3 Pixel Threshold for better trackpad detection
+            if dist < 3: 
+                return
+                 
+            self.last_x = x
+            self.last_y = y
+            self._update_activity()
+        except Exception:
+            pass
 
     def _on_click(self, x, y, button, pressed):
-        self._update_activity()
+        try:
+            self._update_activity()
+        except Exception:
+            pass
 
     def _on_scroll(self, x, y, dx, dy):
-        self._update_activity()
+        try:
+            self._update_activity()
+        except Exception:
+            pass
 
     def _on_key_press(self, key):
         current_time = time.time()

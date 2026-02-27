@@ -51,6 +51,8 @@ class TimeTrackerApp(ctk.CTk):
             self.start_time = None
             self.total_work_seconds = 0
             self.total_idle_seconds = 0
+            self.idle_start_dt = None
+            self.prev_state = "WORKING"
             self.current_date = datetime.date.today().strftime("%Y-%m-%d")
             
             # Sync State
@@ -66,6 +68,7 @@ class TimeTrackerApp(ctk.CTk):
             self.current_state = "WAITING"
             self.tracker = ActivityTracker(idle_threshold_seconds=10) 
             self.api = ApiClient("https://hrms-420.netlify.app/.netlify/functions/api")
+            self.api.logger = logging
             self.app_running = True
             self.last_sync_time = time.time()
             
@@ -99,6 +102,7 @@ class TimeTrackerApp(ctk.CTk):
             if is_startup_launch:
                 print("[SYSTEM] Detected Automatic Startup. Launching in Tray.")
                 logging.info("Startup Mode: TRUE")
+                self.withdraw()
             
             logging.info("Calling check_auto_login()...")
             self.check_auto_login(startup=is_startup_launch)
@@ -199,6 +203,8 @@ class TimeTrackerApp(ctk.CTk):
                 self.handle_login(silent=startup)
         else:
             logging.info("No Credentials found. Showing Login Screen.")
+            if startup:
+                self.deiconify()
 
     def handle_login(self, silent=False):
         """Triggers the login process in a background thread."""
@@ -788,6 +794,8 @@ class TimeTrackerApp(ctk.CTk):
             
         else:
             self.lbl_error.configure(text=msg, text_color="red")
+            if hasattr(self, 'is_silent_login') and self.is_silent_login:
+                self.deiconify()
 
     def add_to_startup(self):
         """Adds the application to Windows Startup via Registry."""
@@ -816,6 +824,18 @@ class TimeTrackerApp(ctk.CTk):
             winreg.CloseKey(key)
             logging.info("Successfully added to Registry Run Key.")
             print("[SYSTEM] Successfully added to Windows Startup.")
+            
+            # Disable Windows 10/11 Startup Delay to ensure app launches instantly on Boot
+            try:
+                serialize_key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize"
+                s_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, serialize_key_path)
+                winreg.SetValueEx(s_key, "StartupDelayInMSec", 0, winreg.REG_DWORD, 0)
+                winreg.CloseKey(s_key)
+                print("[SYSTEM] Bypassed Windows Startup Delay for Instant Launch.")
+                logging.info("StartupDelayInMSec set to 0 to bypass OS delay.")
+            except Exception as e_delay:
+                print(f"[SYSTEM] Note - Could not bypass startup delay: {e_delay}")
+                
         except Exception as e:
             print(f"[SYSTEM] Failed to add to startup: {e}")
 
@@ -952,8 +972,40 @@ class TimeTrackerApp(ctk.CTk):
                 working_hours = self.is_within_working_hours()
                 
                 if self.tracking_active:
-                    state, _ = self.tracker.get_status()
-                    
+                    try:
+                        state, _ = self.tracker.get_status()
+                        
+                         # Detect Transitions for Idle Reporting
+                        if state != self.prev_state:
+                             # print(f"[DEBUG] State Transition: {self.prev_state} -> {state}")
+                             if self.prev_state == "IDLE" and state == "WORKING":
+                                  # Idle session ended -> Upload to server
+                                  idle_end = datetime.datetime.now()
+                                  if self.idle_start_dt:
+                                       duration = (idle_end - self.idle_start_dt).total_seconds()
+                                       # self.log_msg(f"Debug: Idle session ended. Duration: {int(duration)}s")
+                                       if duration >= 5: 
+                                            threading.Thread(target=self.api.save_idle_session, 
+                                                             args=(self.idle_start_dt, idle_end, duration), 
+                                                             daemon=True).start()
+                                  self.idle_start_dt = None
+                             elif state == "IDLE":
+                                  # Idle session started
+                                  self.idle_start_dt = datetime.datetime.now()
+                                  # self.log_msg("Debug: Idle session started.")
+                             
+                             # Immediate Heartbeat on state transition for UI responsiveness
+                             status_to_send = state if working_hours else "OUT_OF_HOURS"
+                             idle_since_ts = self.idle_start_dt.timestamp() if (state == "IDLE" and hasattr(self.idle_start_dt, 'timestamp')) else None
+                             threading.Thread(target=self.api.upload_activity_log, 
+                                              args=(status_to_send, 0, idle_since_ts), 
+                                              daemon=True).start()
+                        
+                        self.prev_state = state
+                    except Exception as te:
+                        # self.log_msg(f"Transition Error: {te}")
+                        pass
+
                     # Update status text if out of hours
                     if not working_hours:
                         self.current_state = "AFTER HOURS (Paused)"
@@ -967,7 +1019,11 @@ class TimeTrackerApp(ctk.CTk):
                     # Upload Heartbeat (Every ~30 seconds)
                     if int(now) % 30 == 0: 
                          status_to_send = state if working_hours else "OUT_OF_HOURS"
-                         threading.Thread(target=self.api.upload_activity_log, args=(status_to_send, 30), daemon=True).start()
+                         # Convert idle_start_dt to timestamp if it exists
+                         idle_since_ts = self.idle_start_dt.timestamp() if (state == "IDLE" and self.idle_start_dt) else None
+                         threading.Thread(target=self.api.upload_activity_log, 
+                                          args=(status_to_send, 30, idle_since_ts), 
+                                          daemon=True).start()
                 
                 # Check Hard Limit internally
                 office_end_time = datetime.datetime.now().replace(hour=self.OFFICE_END_HOUR, minute=0, second=0, microsecond=0)
@@ -1020,6 +1076,19 @@ class TimeTrackerApp(ctk.CTk):
              return
 
         self.log_msg(f"System: Tracking Stopped ({reason}).")
+        
+        # --- Finalize any pending Idle Session ---
+        if self.prev_state == "IDLE" and self.idle_start_dt:
+             idle_end = datetime.datetime.now()
+             duration = (idle_end - self.idle_start_dt).total_seconds()
+             if duration >= 5:
+                  threading.Thread(target=self.api.save_idle_session, 
+                                   args=(self.idle_start_dt, idle_end, duration), 
+                                   daemon=True).start()
+        
+        self.prev_state = "WORKING" # Reset
+        self.idle_start_dt = None
+        
         self.tracking_active = False
         self.tracker.stop()
         self.lbl_status.configure(text="OFF THE CLOCK", text_color="gray")
